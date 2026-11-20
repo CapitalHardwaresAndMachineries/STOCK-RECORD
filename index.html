@@ -763,6 +763,7 @@ th { background: #f1f5f9; }
 }
 .loading-logo img { width:100% !important; height:100% !important; object-fit:contain !important; }
 .loading-title { font-size: clamp(21px, 5vw, 28px); }
+.management-qty-input { width:88px; min-width:72px; padding:8px; }
 .loading-progress {
     display:block;
     width:min(320px, 78vw);
@@ -1754,6 +1755,7 @@ function renderManagement() {
     archiveExpiredManagementOrders();
 
     let container = document.getElementById("orderList");
+    const canEditQuantities = role === "admin" || role === "coadmin";
 
     if (orders.length === 0) {
         container.innerHTML =
@@ -1815,7 +1817,16 @@ function renderManagement() {
                                             <td>${escapeHTML(item.id)}</td>
                                             <td>${escapeHTML(item.name)}</td>
                                             <td>${available}</td>
-                                            <td>${item.qty}</td>
+                                            <td>${canEditQuantities && !completed ? `
+                                                <input
+                                                    class="management-qty-input"
+                                                    type="number"
+                                                    min="1"
+                                                    step="1"
+                                                    value="${Number(item.qty) || 1}"
+                                                    aria-label="Quantity for ${escapeAttr(item.name)} in order ${escapeAttr(order.id)}"
+                                                    onchange="updateOrderQuantity('${escapeAttr(order.id)}','${escapeAttr(item.id)}',this.value)">
+                                            ` : item.qty}</td>
                                             <td>
                                                 <select
                                                     class="decision-select status-${statusClass}"
@@ -1888,6 +1899,42 @@ function setDecision(orderId, productId, status) {
         " to " + status
     );
 
+    renderManagement();
+    updateDashboard();
+}
+
+
+function updateOrderQuantity(orderId, productId, value) {
+
+    if (role !== "admin" && role !== "coadmin") {
+        alert("Only Admin and Co-Admin can change order quantities.");
+        return;
+    }
+
+    const order = orders.find(o => o.id === orderId);
+    const item = order?.items.find(i => i.id === productId);
+    if (!item || item.status === "Completed") return;
+
+    const quantity = Number(value);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+        alert("Enter a whole quantity greater than zero.");
+        renderManagement();
+        return;
+    }
+
+    const product = products.find(p => p.id === productId);
+    if (!product || quantity > product.stock) {
+        alert(`Quantity cannot exceed available stock${product ? ` (${product.stock})` : ""}.`);
+        renderManagement();
+        return;
+    }
+
+    if (quantity === item.qty) return;
+
+    const previousQuantity = item.qty;
+    item.qty = quantity;
+    persistFirebase(window.firebaseData?.setOrder(order));
+    addActivity(`Adjusted ${item.name} in ${orderId} from ${previousQuantity} to ${quantity}`);
     renderManagement();
     updateDashboard();
 }
