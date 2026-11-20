@@ -2476,6 +2476,12 @@ window.stockAppShowLogin = function(message = "") {
 function showLoginScreen() {
   if (!window.firebaseAuthReady) window.stockAppShowLogin();
 }
+window.firebaseAuthReady = false;
+window.firebaseStartupTimer = window.setTimeout(() => {
+  if (!window.firebaseAuthReady) {
+    window.stockAppShowLogin("Firebase is taking too long to start. Refresh the page and check your connection.");
+  }
+}, 12000);
 document.getElementById("loginDesignForm").addEventListener("submit", function(event) {
   event.preventDefault();
   if (window.location.protocol === "file:") {
@@ -2605,6 +2611,7 @@ function startWorkspace(user, role) {
 }
 
 onAuthStateChanged(auth, async user => {
+  window.clearTimeout(window.firebaseStartupTimer);
   window.firebaseAuthReady = true;
   if (!user) {
     clearListeners();
@@ -2612,8 +2619,20 @@ onAuthStateChanged(auth, async user => {
     signOutMessage = "";
     return;
   }
+  window.stockAppShowLogin("Signed in. Checking your account profile…");
   try {
-    const profile = await getDoc(doc(db, "user", user.uid));
+    let profileTimeout;
+    const profileTimeoutPromise = new Promise((_, reject) => {
+      profileTimeout = window.setTimeout(() => {
+        const error = new Error("Timed out reading the Firestore user profile.");
+        error.code = "firestore/profile-timeout";
+        reject(error);
+      }, 15000);
+    });
+    const profile = await Promise.race([
+      getDoc(doc(db, "user", user.uid)),
+      profileTimeoutPromise
+    ]).finally(() => window.clearTimeout(profileTimeout));
     const role = profile.exists()
       ? String(profile.data().role || "").toLowerCase().replace(/[^a-z]/g, "")
       : "";
@@ -2626,8 +2645,10 @@ onAuthStateChanged(auth, async user => {
   } catch (error) {
     console.error("Could not load Firebase user profile:", error);
     window.stockAppShowLogin(error.code === "permission-denied"
-      ? "Firestore denied access to your user profile. Publish the updated Firestore rules, then sign in again."
-      : `Unable to verify your account role (${error.code || "unknown error"}). Check Firebase and Firestore settings.`);
+      ? "Firestore denied access to your user profile. Publish the Firestore rules, then sign in again."
+      : error.code === "firestore/profile-timeout"
+        ? "You signed in, but Firestore did not return your user profile in time. Check your connection and Firestore settings."
+        : `Unable to verify your account role (${error.code || "unknown error"}). Check Firebase and Firestore settings.`);
   }
 });
 </script>
