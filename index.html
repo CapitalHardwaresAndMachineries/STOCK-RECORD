@@ -2613,8 +2613,10 @@ onAuthStateChanged(auth, async user => {
     return;
   }
   try {
-    const profile = await getDoc(doc(db, "users", user.uid));
-    const role = profile.exists() ? profile.data().role : "";
+    const profile = await getDoc(doc(db, "user", user.uid));
+    const role = profile.exists()
+      ? String(profile.data().role || "").toLowerCase().replace(/[^a-z]/g, "")
+      : "";
     if (!["admin", "coadmin", "staff"].includes(role)) {
       signOutMessage = "This account has no assigned role. Ask your Firebase administrator to add a users/UID profile with role admin, coadmin, or staff.";
       await signOut(auth);
@@ -2623,7 +2625,9 @@ onAuthStateChanged(auth, async user => {
     startWorkspace(user, role);
   } catch (error) {
     console.error("Could not load Firebase user profile:", error);
-    window.stockAppShowLogin("Unable to verify your account role. Check the Firestore rules.");
+    window.stockAppShowLogin(error.code === "permission-denied"
+      ? "Firestore denied access to your user profile. Publish the updated Firestore rules, then sign in again."
+      : `Unable to verify your account role (${error.code || "unknown error"}). Check Firebase and Firestore settings.`);
   }
 });
 </script>
