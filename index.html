@@ -2504,6 +2504,7 @@ window.stockAppSetRole = async function(assignedRole, email) {
     document.getElementById("userIdentity").textContent =
         `${roleLabels[assignedRole] || assignedRole} · ${email || ""}`;
     document.getElementById("loginScreen").style.display = "none";
+    document.getElementById("loadingScreen").style.display = "none";
     document.getElementById("stockApp").style.display = "block";
     changeRole(assignedRole);
     renderCart();
