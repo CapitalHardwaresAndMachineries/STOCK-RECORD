@@ -5,6 +5,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stock Management System</title>
+<script defer src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 
 <style>
 * {
@@ -977,6 +978,14 @@ th { background: #f1f5f9; }
         Add Product
     </button>
 
+    <hr>
+    <h3>Import Products from Excel</h3>
+    <p class="small">Choose an .xlsx file. The first sheet must have Product ID, Product Name, Category, and Opening Stock columns. Existing product IDs will be skipped, not overwritten.</p>
+    <input id="productImportFile" type="file" accept=".xlsx,.xls" aria-label="Choose Excel stock file" onchange="resetProductImportPreview()">
+    <button type="button" onclick="previewProductImport()">Preview File</button>
+    <div id="productImportStatus" class="small" role="status" aria-live="polite" style="margin-top:10px"></div>
+    <button id="productImportButton" type="button" style="display:none" onclick="importPendingProducts()">Import Products</button>
+
 </div>
 
 <div class="table-wrap">
@@ -1173,6 +1182,9 @@ let products = [
     {id:"P011",name:"Wireless Mouse",category:"Electronics",stock:25},
     {id:"P012",name:"USB Adapter",category:"Accessories",stock:45}
 ];
+window.productDataReady = false;
+let pendingProductImport = [];
+let productImportBusy = false;
 
 let orders = [];
 // Orders cleared from Order Management are archived so completed Stock OUT
@@ -1450,6 +1462,151 @@ function addProduct() {
     renderInventory();
     updateDashboard();
 
+}
+
+
+function resetProductImportPreview() {
+    pendingProductImport = [];
+    document.getElementById("productImportStatus").textContent = "";
+    document.getElementById("productImportButton").style.display = "none";
+}
+
+
+function previewProductImport() {
+    const status = document.getElementById("productImportStatus");
+    const importButton = document.getElementById("productImportButton");
+    const file = document.getElementById("productImportFile").files[0];
+    resetProductImportPreview();
+
+    if (role !== "admin") {
+        status.textContent = "Only Admin can import products.";
+        return;
+    }
+    if (!window.productDataReady) {
+        status.textContent = "Inventory is still loading. Wait a moment, then preview the file again.";
+        return;
+    }
+    if (!file) {
+        status.textContent = "Choose an Excel file first.";
+        return;
+    }
+    if (!window.XLSX) {
+        status.textContent = "The Excel reader did not load. Check your connection and refresh the page.";
+        return;
+    }
+
+    status.textContent = "Reading file…";
+    const readFile = async () => {
+        const workbook = window.XLSX.read(await file.arrayBuffer(), {type:"array", cellText:true});
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        if (!firstSheet) throw new Error("The workbook has no worksheets.");
+        const rows = window.XLSX.utils.sheet_to_json(firstSheet, {
+            header:1, raw:false, defval:"", blankrows:true
+        });
+        if (!rows.length) throw new Error("The first worksheet is empty.");
+
+        const normalizeHeader = value => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+        const headers = rows[0].map(normalizeHeader);
+        const columns = {
+            id: headers.indexOf("productid"),
+            name: headers.indexOf("productname"),
+            category: headers.indexOf("category"),
+            stock: headers.indexOf("openingstock")
+        };
+        if (Object.values(columns).some(index => index < 0)) {
+            throw new Error("Row 1 must contain Product ID, Product Name, Category, and Opening Stock headers.");
+        }
+
+        const existingIds = new Set(products.map(product => String(product.id).trim().toLowerCase()));
+        const fileIds = new Set();
+        const newProducts = [];
+        const errors = [];
+        let existingCount = 0;
+
+        for (let index = 1; index < rows.length; index++) {
+            const row = rows[index];
+            if (row.every(value => String(value || "").trim() === "")) continue;
+
+            const rowNumber = index + 1;
+            const id = String(row[columns.id] ?? "").trim();
+            const name = String(row[columns.name] ?? "").trim();
+            const category = String(row[columns.category] ?? "").trim();
+            const stockText = String(row[columns.stock] ?? "").trim().replace(/,/g, "");
+            const stock = Number(stockText);
+            let issue = "";
+
+            if (!id || !name || !category) issue = "missing Product ID, Product Name, or Category";
+            else if (fileIds.has(id.toLowerCase())) issue = `duplicate Product ID ${id} in the file`;
+            else if (!stockText || !Number.isSafeInteger(stock) || stock < 0) issue = "Opening Stock must be a whole number zero or greater";
+
+            if (issue) {
+                errors.push(`Row ${rowNumber}: ${issue}`);
+                continue;
+            }
+
+            fileIds.add(id.toLowerCase());
+            if (existingIds.has(id.toLowerCase())) {
+                existingCount++;
+                continue;
+            }
+            newProducts.push({id, name, category, stock});
+        }
+
+        if (errors.length) {
+            status.textContent = `Found ${errors.length} problem${errors.length === 1 ? "" : "s"}. Fix the file and preview it again. ${errors.slice(0, 8).join("; ")}${errors.length > 8 ? "; …" : ""}`;
+            return;
+        }
+        pendingProductImport = newProducts;
+        status.textContent = `Ready to add ${newProducts.length} product${newProducts.length === 1 ? "" : "s"}. ${existingCount} ID${existingCount === 1 ? "" : "s"} already in inventory will be skipped.`;
+        if (newProducts.length) {
+            importButton.textContent = `Import ${newProducts.length} Products`;
+            importButton.style.display = "inline-block";
+        }
+    };
+
+    readFile().catch(error => {
+        console.error("Could not preview product workbook:", error);
+        status.textContent = error.message || "Could not read the Excel file.";
+    });
+}
+
+
+async function importPendingProducts() {
+    const status = document.getElementById("productImportStatus");
+    const importButton = document.getElementById("productImportButton");
+    if (role !== "admin" || productImportBusy || !pendingProductImport.length) return;
+    if (!window.firebaseData?.importProductBatch) {
+        status.textContent = "Firebase is not ready. Refresh the page and try again.";
+        return;
+    }
+    const total = pendingProductImport.length;
+    if (!confirm(`Import ${total} new products into Firebase? Existing product IDs will be skipped.`)) return;
+
+    productImportBusy = true;
+    importButton.disabled = true;
+    let processed = 0;
+    let added = 0;
+    let skipped = 0;
+    try {
+        for (let offset = 0; offset < total; offset += 200) {
+            const chunk = pendingProductImport.slice(offset, offset + 200);
+            const result = await window.firebaseData.importProductBatch(chunk);
+            added += result.added;
+            skipped += result.skipped;
+            processed += chunk.length;
+            status.textContent = `Saving products… ${processed} of ${total}`;
+        }
+        status.textContent = `Import complete. Added ${added} products. Skipped ${skipped} IDs that already existed.`;
+        pendingProductImport = [];
+        importButton.style.display = "none";
+        document.getElementById("productImportFile").value = "";
+    } catch (error) {
+        console.error("Product import stopped:", error);
+        status.textContent = `Import stopped after ${processed} of ${total} rows. Earlier batches may have saved. Preview the same file again to skip saved IDs and retry. ${error.code || error.message || "Check Firebase access."}`;
+    } finally {
+        productImportBusy = false;
+        importButton.disabled = false;
+    }
 }
 
 
@@ -2641,7 +2798,7 @@ setInterval(() => {
 import { initializeApp } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js";
 import {
-  getFirestore, collection, doc, getDoc, onSnapshot, setDoc, writeBatch
+  getFirestore, collection, doc, getDoc, onSnapshot, runTransaction, setDoc, writeBatch
 } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -2663,6 +2820,21 @@ window.firebaseSignIn = (email, password) => signInWithEmailAndPassword(auth, em
 window.firebaseSignOut = () => signOut(auth);
 window.firebaseData = {
   setProduct: product => setDoc(doc(db, "products", product.id), product),
+  importProductBatch: async productsToImport => runTransaction(db, async transaction => {
+    const refs = productsToImport.map(product => doc(db, "products", product.id));
+    const snapshots = await Promise.all(refs.map(reference => transaction.get(reference)));
+    let added = 0;
+    let skipped = 0;
+    snapshots.forEach((snapshot, index) => {
+      if (snapshot.exists()) {
+        skipped++;
+      } else {
+        transaction.set(refs[index], productsToImport[index]);
+        added++;
+      }
+    });
+    return {added, skipped};
+  }),
   setOrder: order => setDoc(doc(db, "orders", order.id), order),
   archiveOrder: async order => {
     const batch = writeBatch(db);
@@ -2680,6 +2852,7 @@ function clearListeners() {
 
 function listenCollection(name, callback) {
   unsubscribeData.push(onSnapshot(collection(db, name), snapshot => {
+    if (name === "products") window.productDataReady = true;
     callback(snapshot.docs.map(item => ({...item.data(), id: item.id})));
   }, error => {
     console.error(`Could not load ${name}:`, error);
