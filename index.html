@@ -2002,6 +2002,10 @@ function submitReturn() {
         alert("Your account cannot submit a return.");
         return;
     }
+    if (!orderSequenceReady) {
+        alert("The shared order number is still loading. Please try again in a moment.");
+        return;
+    }
     if (!returnCart.length) {
         alert("Please select returned products first.");
         return;
@@ -2021,7 +2025,8 @@ function submitReturn() {
     }
 
     const order = {
-        id: "RET-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+        id: "RET-" + String(activeOrderSequence).padStart(4, "0"),
+        recordId: "RETREC-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10),
         kind: "return",
         type,
         customer,
@@ -2719,7 +2724,9 @@ function renderStaffOrderHistory() {
     staffOrders.forEach(order => {
         order.items.forEach(item => {
             rows.push({
-                date: order.date,
+                date: order.createdAtValue
+                    ? new Date(order.createdAtValue).toLocaleDateString()
+                    : String(order.date || "").split(",")[0],
                 orderId: order.id,
                 productId: item.id,
                 productName: item.name,
@@ -2742,7 +2749,7 @@ function renderStaffOrderHistory() {
 
     container.innerHTML = `
         <div class="staff-history-row staff-history-header">
-            <span>Date / Time</span>
+            <span>Date</span>
             <span>Order ID</span>
             <span>Product</span>
             <span>Quantity Changes</span>
@@ -3009,7 +3016,7 @@ function clearOrderHistory() {
     }
 
     if (!confirm(
-        "Clear all completed records from Order History? This does not change stock or remove pending/approved orders from Order Management."
+        "Clear Order History for both Admin and Co-Admin? Staff Order History will stay unchanged. This does not change stock or remove orders from Order Management."
     )) {
         return;
     }
@@ -3067,7 +3074,7 @@ window.stockAppApplyFirebaseData = function(data) {
     if (Array.isArray(data.orders)) orders = data.orders;
     if (Array.isArray(data.orderHistory)) orderHistory = data.orderHistory;
     if (Array.isArray(data.archivedOrders)) archivedOrders = data.archivedOrders;
-    if (data.settings) {
+    if (data.settingsReady && data.settings) {
         staffHistoryClearedAt = Number(data.settings.staffHistoryClearedAt || 0);
         adminHistoryClearedAt = Number(data.settings.adminHistoryClearedAt || 0);
         activeOrderSequence = Math.max(1, Number(data.settings.activeOrderSequence || 1));
