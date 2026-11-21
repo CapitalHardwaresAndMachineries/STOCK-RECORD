@@ -360,6 +360,13 @@ th { background: #f1f5f9; }
     width: 75px;
 }
 
+.cart-item-note {
+    flex: 1 0 100%;
+    width: 100%;
+    min-height: 58px;
+    resize: vertical;
+}
+
 .empty {
     text-align: center;
     color: #64748b;
@@ -843,6 +850,10 @@ th { background: #f1f5f9; }
         📝 Order
     </button>
 
+    <button onclick="showPage('returns',this)">
+        ↩️ Return
+    </button>
+
     <button onclick="showPage('management',this)">
         📋 Order Management
     </button>
@@ -882,7 +893,7 @@ th { background: #f1f5f9; }
     </div>
 
     <div class="stat">
-        <div class="small">Pending Orders</div>
+        <div class="small">Pending Order &amp; Return Items</div>
         <h2 id="pendingOrders">0</h2>
     </div>
 
@@ -958,7 +969,7 @@ th { background: #f1f5f9; }
 <input class="search"
        id="inventorySearch"
        placeholder="Search Product ID, Name or Category..."
-       oninput="renderInventory()">
+       oninput="inventoryPage=1;renderInventory()">
 
 <div id="adminProductForm"
      class="card"
@@ -1000,6 +1011,12 @@ th { background: #f1f5f9; }
 
 </table>
 
+</div>
+
+<div class="pagination" aria-label="Inventory pages">
+    <button id="inventoryPreviousPage" onclick="changeInventoryPage(-1)">Previous</button>
+    <span id="inventoryPageInfo" class="page-info" aria-live="polite"></span>
+    <button id="inventoryNextPage" onclick="changeInventoryPage(1)">Next</button>
 </div>
 
 </section>
@@ -1060,6 +1077,34 @@ th { background: #f1f5f9; }
 
 </section>
 
+<!-- RETURNS -->
+<section id="returns" class="page">
+    <h2>Return Items</h2>
+    <div class="card">
+        <h3>Return Information</h3>
+        <label for="returnType">Return Type</label>
+        <select id="returnType" onchange="toggleReturnCustomer()">
+            <option value="Shop Return">Shop Return</option>
+            <option value="Customer Return">Customer Return</option>
+        </select>
+        <div id="returnCustomerField" style="display:none;margin-top:15px">
+            <label for="returnCustomerName">Customer Name</label>
+            <input id="returnCustomerName" class="full-width" placeholder="Enter customer name">
+        </div>
+    </div>
+    <div class="card">
+        <h3>Search Returned Products</h3>
+        <input id="returnSearch" class="search" placeholder="Search Product ID, Name or Category..." oninput="searchReturnProducts()">
+        <div id="returnSearchResults"></div>
+        <div class="order-items-panel">
+            <div class="order-items-title">Return Items</div>
+            <div id="returnCart">No products added yet.</div>
+            <div class="order-submit-row">
+                <button class="green" onclick="submitReturn()">Submit Return</button>
+            </div>
+        </div>
+    </div>
+</section>
 
 <!-- ORDER MANAGEMENT -->
 
@@ -1068,9 +1113,9 @@ th { background: #f1f5f9; }
 <div class="management-heading">
     <div>
         <h2>Order Management</h2>
-        <p class="small">Orders are automatically removed from this page 24 hours after submission. Completed Stock OUT records remain in Order History.</p>
+        <p class="small">Orders and returns are removed from this page 24 hours after submission. Completed stock movements remain in Order History.</p>
     </div>
-    <button class="red" onclick="clearOrderManagement()">Clear Orders</button>
+    <button class="red" onclick="clearOrderManagement()">Archive Orders &amp; Returns</button>
 </div>
 
 <div id="orderList"></div>
@@ -1111,7 +1156,7 @@ th { background: #f1f5f9; }
 <div class="history-heading">
     <div>
         <h2>Order History</h2>
-        <p class="small">Completed Stock OUT records. This history is not cleared automatically.</p>
+        <p class="small">Completed Stock OUT and Stock IN records. This history is not cleared automatically.</p>
     </div>
     <div class="history-actions">
         <button class="green" onclick="downloadOrderHistoryExcel()">Download Excel</button>
@@ -1187,10 +1232,11 @@ let pendingProductImport = [];
 let productImportBusy = false;
 
 let orders = [];
-// Orders cleared from Order Management are archived so completed Stock OUT
-// records remain available in Order History and recent staff history.
+// Orders and returns cleared from management are archived so completed stock
+// movements remain available in Order History and recent staff history.
 let archivedOrders = [];
 let cart = [];
+let returnCart = [];
 let activity = [];
 
 // Staff history can be cleared independently without deleting Admin records.
@@ -1212,6 +1258,8 @@ function persistFirebase(operation) {
 
 const ITEMS_PER_PAGE = 10;
 let popularPage = 1;
+const INVENTORY_ITEMS_PER_PAGE = 30;
+let inventoryPage = 1;
 
 // ORDER HISTORY PAGINATION
 const HISTORY_ITEMS_PER_PAGE = 50;
@@ -1321,13 +1369,18 @@ function showPage(id, button) {
 function renderInventory() {
 
     let query = document.getElementById("inventorySearch")
-        .value.toLowerCase();
+        .value.toLowerCase().trim();
 
     let filtered = products.filter(p =>
-        [p.id,p.name,p.category].some(v =>
-            v.toLowerCase().includes(query)
+        [p.id,p.name,p.category].some(value =>
+            String(value || "").toLowerCase().includes(query)
         )
     );
+
+    const totalPages = Math.max(1, Math.ceil(filtered.length / INVENTORY_ITEMS_PER_PAGE));
+    inventoryPage = Math.max(1, Math.min(inventoryPage, totalPages));
+    const startIndex = (inventoryPage - 1) * INVENTORY_ITEMS_PER_PAGE;
+    const visibleProducts = filtered.slice(startIndex, startIndex + INVENTORY_ITEMS_PER_PAGE);
 
     let header = `
         <th>Product ID</th>
@@ -1345,7 +1398,7 @@ function renderInventory() {
 
     document.getElementById("inventoryBody").innerHTML =
 
-        filtered.map(p => `
+        visibleProducts.map(p => `
 
         <tr>
             <td>${escapeHTML(p.id)}</td>
@@ -1375,8 +1428,21 @@ function renderInventory() {
 
         </tr>
 
-        `).join("");
+        `).join("") || `<tr><td colspan="${role === "admin" ? 5 : 4}">No products found.</td></tr>`;
 
+    const showingFrom = filtered.length ? startIndex + 1 : 0;
+    const showingTo = Math.min(startIndex + INVENTORY_ITEMS_PER_PAGE, filtered.length);
+    document.getElementById("inventoryPageInfo").textContent =
+        `Page ${inventoryPage} of ${totalPages} · Showing ${showingFrom}-${showingTo} of ${filtered.length}`;
+    document.getElementById("inventoryPreviousPage").disabled = inventoryPage <= 1;
+    document.getElementById("inventoryNextPage").disabled = inventoryPage >= totalPages;
+
+}
+
+
+function changeInventoryPage(direction) {
+    inventoryPage += direction;
+    renderInventory();
 }
 
 
@@ -1705,7 +1771,7 @@ function addToCart(id) {
         existing.qty = qty;
         existing.stock = p.stock;
     } else {
-        cart.push({...p,qty});
+        cart.push({...p,qty,note:""});
     }
 
     renderCart();
@@ -1734,6 +1800,11 @@ function renderCart() {
                    value="${p.qty}"
                    aria-label="Quantity for ${escapeAttr(p.name)}"
                    onchange="updateQty(${i},this.value)">
+
+            <textarea class="cart-item-note" maxlength="300" rows="2"
+                      aria-label="Note for ${escapeAttr(p.name)}"
+                      placeholder="Note for this item (optional)"
+                      oninput="updateCartNote(${i},this.value)">${escapeHTML(p.note || "")}</textarea>
 
             <button class="red"
                     onclick="removeCart(${i})">
@@ -1767,12 +1838,170 @@ function updateQty(i, value) {
 }
 
 
+function updateCartNote(index, value) {
+    if (cart[index]) cart[index].note = value.slice(0, 300);
+}
+
+
 function removeCart(i) {
 
     cart.splice(i,1);
     renderCart();
     searchProducts();
 
+}
+
+
+function toggleReturnCustomer() {
+    const isCustomerReturn = document.getElementById("returnType").value === "Customer Return";
+    document.getElementById("returnCustomerField").style.display = isCustomerReturn ? "block" : "none";
+}
+
+
+function searchReturnProducts() {
+    const query = document.getElementById("returnSearch").value.toLowerCase().trim();
+    if (!query) {
+        document.getElementById("returnSearchResults").innerHTML = "";
+        return;
+    }
+    const results = products.filter(product =>
+        [product.id, product.name, product.category].some(value =>
+            String(value || "").toLowerCase().includes(query)
+        )
+    );
+    document.getElementById("returnSearchResults").innerHTML = results.map(product => `
+        <div class="product-result">
+            <div class="product-result-main">
+                <strong>${escapeHTML(product.name)}</strong>
+                <div class="small">${escapeHTML(product.id)} · ${escapeHTML(product.category)} · Current stock: ${product.stock}</div>
+            </div>
+            <div class="product-order-controls">
+                <input id="returnQty-${escapeAttr(product.id)}" type="number" min="1"
+                       value="${returnCart.find(item => item.id === product.id)?.qty || 1}"
+                       aria-label="Return quantity for ${escapeAttr(product.name)}">
+                <button type="button" onclick="addToReturnCart('${escapeAttr(product.id)}')">Add</button>
+            </div>
+        </div>
+    `).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
+}
+
+
+function addToReturnCart(id) {
+    const product = products.find(item => item.id === id);
+    const quantityInput = document.getElementById("returnQty-" + id);
+    const quantity = Number(quantityInput?.value || 1);
+    if (!product || !Number.isInteger(quantity) || quantity < 1) {
+        alert("Enter a whole return quantity greater than zero.");
+        return;
+    }
+    const existing = returnCart.find(item => item.id === id);
+    if (existing) {
+        existing.qty = quantity;
+    } else {
+        returnCart.push({...product, qty:quantity, note:""});
+    }
+    renderReturnCart();
+    searchReturnProducts();
+}
+
+
+function renderReturnCart() {
+    document.getElementById("returnCart").innerHTML = returnCart.map((product, index) => `
+        <div class="cart-row">
+            <div class="cart-row-main">
+                <strong>${escapeHTML(product.name)}</strong>
+                <div class="small">${escapeHTML(product.id)} · Current stock: ${product.stock}</div>
+            </div>
+            <input type="number" min="1" step="1" value="${product.qty}"
+                   aria-label="Return quantity for ${escapeAttr(product.name)}"
+                   onchange="updateReturnQty(${index},this.value)">
+            <button class="red" type="button" onclick="removeReturnCart(${index})">Remove</button>
+            <textarea class="cart-item-note" maxlength="300" rows="2"
+                      aria-label="Return note for ${escapeAttr(product.name)}"
+                      placeholder="Note for this item (optional)"
+                      oninput="updateReturnNote(${index},this.value)">${escapeHTML(product.note || "")}</textarea>
+        </div>
+    `).join("") || '<div class="small">No products added yet.</div>';
+}
+
+
+function updateReturnQty(index, value) {
+    const quantity = Number(value);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+        alert("Enter a whole return quantity greater than zero.");
+        renderReturnCart();
+        return;
+    }
+    returnCart[index].qty = quantity;
+    searchReturnProducts();
+}
+
+
+function updateReturnNote(index, value) {
+    if (returnCart[index]) returnCart[index].note = value.slice(0, 300);
+}
+
+
+function removeReturnCart(index) {
+    returnCart.splice(index, 1);
+    renderReturnCart();
+    searchReturnProducts();
+}
+
+
+function submitReturn() {
+    if (!['admin', 'coadmin', 'staff'].includes(role)) {
+        alert("Your account cannot submit a return.");
+        return;
+    }
+    if (!returnCart.length) {
+        alert("Please select returned products first.");
+        return;
+    }
+
+    const type = document.getElementById("returnType").value;
+    const customer = document.getElementById("returnCustomerName").value.trim();
+    if (type === "Customer Return" && !customer) {
+        alert("Enter the customer name.");
+        return;
+    }
+    for (const item of returnCart) {
+        if (!products.some(product => product.id === item.id)) {
+            alert(`Product ${item.id} is no longer in inventory. Refresh and try again.`);
+            return;
+        }
+    }
+
+    const order = {
+        id: "RET-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+        kind: "return",
+        type,
+        customer,
+        createdBy: role.toUpperCase(),
+        date: new Date().toLocaleString(),
+        createdAtValue: Date.now(),
+        items: returnCart.map(item => ({
+            id:item.id,
+            name:item.name,
+            category:item.category,
+            qty:item.qty,
+            note:String(item.note || "").trim(),
+            status:"Pending",
+            adminApproved:false
+        }))
+    };
+
+    orders.push(order);
+    persistFirebase(window.firebaseData?.setOrder(order));
+    addActivity("Submitted return " + order.id);
+    returnCart = [];
+    renderReturnCart();
+    document.getElementById("returnSearch").value = "";
+    document.getElementById("returnSearchResults").innerHTML = "";
+    document.getElementById("returnCustomerName").value = "";
+    renderManagement();
+    updateDashboard();
+    alert("Return submitted successfully! " + order.id);
 }
 
 
@@ -1826,6 +2055,7 @@ function submitOrder() {
             name:p.name,
             category:p.category,
             qty:p.qty,
+            note:String(p.note || "").trim(),
             status:"Pending",
             adminApproved:false
         }))
@@ -1892,8 +2122,8 @@ function clearOrderManagement() {
         return;
     }
 
-    // Move current orders to the archive instead of deleting them.
-    // This preserves completed Stock OUT history and recent staff history.
+    // Move current orders and returns to the archive instead of deleting them.
+    // This preserves completed stock movement history.
     archivedOrders.push(...orders);
     orders.forEach(order => persistFirebase(window.firebaseData?.archiveOrder(order)));
     orders = [];
@@ -1902,7 +2132,7 @@ function clearOrderManagement() {
     updateDashboard();
     renderOrderHistory();
 
-    alert("Order Management cleared. Completed Stock OUT records are retained in Order History.");
+    alert("Order Management cleared. Completed stock movements are retained in Order History.");
 
 }
 
@@ -1916,7 +2146,7 @@ function renderManagement() {
 
     if (orders.length === 0) {
         container.innerHTML =
-            '<div class="empty">No incoming orders yet.</div>';
+            '<div class="empty">No incoming orders or returns yet.</div>';
         return;
     }
 
@@ -1956,10 +2186,11 @@ function renderManagement() {
                                 <tr>
                                     <th>Product ID</th>
                                     <th>Product</th>
-                                    <th>Available</th>
+                                    <th>${order.kind === "return" ? "Current Stock" : "Available"}</th>
                                     <th>Requested</th>
+                                    <th>Item Note</th>
                                     <th>Decision</th>
-                                    ${role === "admin" ? "<th>Admin Approval</th>" : ""}
+                                    ${role === "admin" ? `<th>${order.kind === "return" ? "Stock IN" : "Stock OUT"}</th>` : ""}
                                 </tr>
                             </thead>
                             <tbody>
@@ -1968,6 +2199,7 @@ function renderManagement() {
                                     const available = product ? product.stock : 0;
                                     const statusClass = item.status.toLowerCase();
                                     const completed = item.status === "Completed";
+                                    const isReturn = order.kind === "return";
 
                                     return `
                                         <tr>
@@ -1984,6 +2216,7 @@ function renderManagement() {
                                                     aria-label="Quantity for ${escapeAttr(item.name)} in order ${escapeAttr(order.id)}"
                                                     onchange="updateOrderQuantity('${escapeAttr(order.id)}','${escapeAttr(item.id)}',this.value)">
                                             ` : item.qty}</td>
+                                            <td>${item.note ? escapeHTML(item.note) : "—"}</td>
                                             <td>
                                                 <select
                                                     class="decision-select status-${statusClass}"
@@ -2003,9 +2236,9 @@ function renderManagement() {
                                                 <td>
                                                     <button
                                                         class="admin-approve ${completed ? "is-approved" : ""}"
-                                                        onclick="stockOutItem('${escapeAttr(order.id)}','${escapeAttr(item.id)}')"
+                                                        onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(order.id)}','${escapeAttr(item.id)}')"
                                                         ${item.status !== "Approved" || completed ? "disabled" : ""}>
-                                                        ${completed ? "Completed" : "Stock OUT"}
+                                                        ${completed ? "Completed" : isReturn ? "Stock IN" : "Stock OUT"}
                                                     </button>
                                                 </td>
                                             ` : ""}
@@ -2080,7 +2313,7 @@ function updateOrderQuantity(orderId, productId, value) {
     }
 
     const product = products.find(p => p.id === productId);
-    if (!product || quantity > product.stock) {
+    if (!product || (order.kind !== "return" && quantity > product.stock)) {
         alert(`Quantity cannot exceed available stock${product ? ` (${product.stock})` : ""}.`);
         renderManagement();
         return;
@@ -2105,7 +2338,7 @@ function stockOutItem(orderId, productId) {
     }
 
     const order = orders.find(o => o.id === orderId);
-    if (!order) return;
+    if (!order || order.kind === "return") return;
 
     const item = order.items.find(i => i.id === productId);
     if (!item || item.status !== "Approved") {
@@ -2134,6 +2367,43 @@ function stockOutItem(orderId, productId) {
     renderOrderHistory();
     updateDashboard();
 
+}
+
+
+async function stockInReturn(orderId, productId) {
+    if (role !== "admin") {
+        alert("Only Admin can process Stock IN returns.");
+        return;
+    }
+    const order = orders.find(current => current.id === orderId);
+    if (!order || order.kind !== "return") return;
+
+    const item = order.items.find(current => current.id === productId);
+    if (!item || item.status !== "Approved") {
+        alert("The return item must first be marked Approved.");
+        return;
+    }
+    let completed;
+    try {
+        completed = await window.firebaseData.completeReturn(orderId, productId);
+    } catch (error) {
+        console.error("Could not process stock return:", error);
+        alert(error.message || "Could not process this return. Refresh the page and try again.");
+        return;
+    }
+
+    const localProduct = products.find(current => current.id === productId);
+    if (localProduct) localProduct.stock = completed.product.stock;
+    const localOrder = orders.find(current => current.id === orderId);
+    if (localOrder) Object.assign(localOrder, completed.order);
+    const completedItem = completed.order.items.find(current => current.id === productId);
+
+    historyPage = 1;
+    addActivity("Stock IN return: " + completedItem.name + " × " + completedItem.qty);
+    renderManagement();
+    renderInventory();
+    renderOrderHistory();
+    updateDashboard();
 }
 
 
@@ -2218,7 +2488,7 @@ function renderPopularItems(resetPage = false) {
             // regardless of the quantity ordered.
 
             let confirmedOrders = [...archivedOrders, ...orders].filter(order =>
-
+                order.kind !== "return" &&
                 order.items.some(item =>
 
                     item.id === p.id &&
@@ -2449,6 +2719,7 @@ function getAdminOrderHistoryItems() {
                 historyItems.push({
                     orderId: order.id,
                     type: order.type,
+                    movement: order.kind === "return" ? "Stock IN" : "Stock OUT",
                     createdBy: order.createdBy,
                     orderDate: order.date,
                     customer: order.customer,
@@ -2490,7 +2761,8 @@ function renderOrderHistory() {
             <table>
                 <thead>
                     <tr>
-                        <th>Stock OUT Date</th>
+                        <th>Completed At</th>
+                        <th>Movement</th>
                         <th>Order ID</th>
                         <th>Product ID</th>
                         <th>Product Name</th>
@@ -2504,6 +2776,7 @@ function renderOrderHistory() {
                     ${visibleItems.map(item => `
                         <tr>
                             <td>${escapeHTML(item.completedAt)}</td>
+                            <td>${escapeHTML(item.movement)}</td>
                             <td>${escapeHTML(item.orderId)}</td>
                             <td>${escapeHTML(item.productId)}</td>
                             <td>${escapeHTML(item.productName)}</td>
@@ -2517,7 +2790,7 @@ function renderOrderHistory() {
             </table>
         </div>
 
-    ` : '<div class="empty">No completed Stock OUT records in Order History.</div>';
+    ` : '<div class="empty">No completed stock movements in Order History.</div>';
 
     const showingFrom = totalItems === 0 ? 0 : startIndex + 1;
     const showingTo = Math.min(startIndex + HISTORY_ITEMS_PER_PAGE, totalItems);
@@ -2546,7 +2819,8 @@ function downloadOrderHistoryExcel() {
     }
 
     const headers = [
-        "Stock OUT Date",
+        "Completed At",
+        "Movement",
         "Order ID",
         "Product ID",
         "Product Name",
@@ -2559,6 +2833,7 @@ function downloadOrderHistoryExcel() {
     const tableRows = historyItems.map(item => `
         <tr>
             <td>${escapeHTML(item.completedAt)}</td>
+            <td>${escapeHTML(item.movement)}</td>
             <td>${escapeHTML(item.orderId)}</td>
             <td>${escapeHTML(item.productId)}</td>
             <td>${escapeHTML(item.productName)}</td>
@@ -2820,6 +3095,37 @@ window.firebaseSignIn = (email, password) => signInWithEmailAndPassword(auth, em
 window.firebaseSignOut = () => signOut(auth);
 window.firebaseData = {
   setProduct: product => setDoc(doc(db, "products", product.id), product),
+  completeReturn: (orderId, productId) => runTransaction(db, async transaction => {
+    const orderRef = doc(db, "orders", orderId);
+    const productRef = doc(db, "products", productId);
+    const [orderSnapshot, productSnapshot] = await Promise.all([
+      transaction.get(orderRef),
+      transaction.get(productRef)
+    ]);
+    if (!orderSnapshot.exists() || !productSnapshot.exists()) {
+      throw new Error("The return order or product could not be found.");
+    }
+    const orderData = orderSnapshot.data();
+    const productData = productSnapshot.data();
+    const returnItem = orderData.items?.find(item => item.id === productId);
+    if (orderData.kind !== "return" || !returnItem) {
+      throw new Error("This is not a valid return item.");
+    }
+    if (returnItem.status !== "Approved") {
+      throw new Error("The return item must first be marked Approved.");
+    }
+    const quantity = Number(returnItem.qty);
+    if (!Number.isSafeInteger(quantity) || quantity < 1) {
+      throw new Error("The return quantity is invalid.");
+    }
+    productData.stock = Number(productData.stock || 0) + quantity;
+    returnItem.status = "Completed";
+    returnItem.completedAt = new Date().toLocaleString();
+    returnItem.completedAtValue = Date.now();
+    transaction.set(productRef, productData);
+    transaction.set(orderRef, orderData);
+    return {product:productData, order:orderData};
+  }),
   importProductBatch: async productsToImport => runTransaction(db, async transaction => {
     const refs = productsToImport.map(product => doc(db, "products", product.id));
     const snapshots = await Promise.all(refs.map(reference => transaction.get(reference)));
