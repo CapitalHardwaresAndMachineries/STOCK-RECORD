@@ -15,14 +15,19 @@
 body {
     margin: 0;
     font-family: Arial, sans-serif;
+    font-size: 14px;
     background: #f3f5f9;
     color: #202938;
 }
 
+h1 { font-size: 1.65em; }
+h2 { font-size: 1.4em; }
+h3 { font-size: 1.15em; }
+
 header {
     background: #172554;
     color: white;
-    padding: 16px 22px;
+    padding: 13px 18px;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -38,9 +43,9 @@ header h2 { margin: 0; }
 }
 
 .sidebar {
-    width: 220px;
+    width: 205px;
     background: #1e293b;
-    padding: 18px 12px;
+    padding: 15px 10px;
     flex-shrink: 0;
 }
 
@@ -50,7 +55,7 @@ header h2 { margin: 0; }
     background: transparent;
     color: white;
     margin-bottom: 8px;
-    padding: 13px;
+    padding: 10px;
 }
 
 .sidebar button:hover,
@@ -61,7 +66,7 @@ header h2 { margin: 0; }
 main {
     flex: 1;
     min-width: 0;
-    padding: 24px;
+    padding: 18px;
 }
 
 .page { display: none; }
@@ -69,20 +74,20 @@ main {
 
 .card, .stat {
     background: white;
-    padding: 19px;
+    padding: 15px;
     border-radius: 10px;
-    margin-bottom: 18px;
+    margin-bottom: 14px;
     box-shadow: 0 2px 8px #0000000a;
 }
 
 .stats {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
+    gap: 11px;
 }
 
 .stat h2 {
-    font-size: 27px;
+    font-size: 24px;
     margin: 10px 0 0;
 }
 
@@ -93,7 +98,7 @@ main {
 
 input, select, button {
     font: inherit;
-    padding: 11px;
+    padding: 9px;
     border-radius: 6px;
     border: 1px solid #d1d5db;
 }
@@ -135,7 +140,7 @@ table {
 }
 
 th, td {
-    padding: 12px;
+    padding: 9px;
     border-bottom: 1px solid #e5e7eb;
     text-align: left;
 }
@@ -158,7 +163,7 @@ th { background: #f1f5f9; }
 
 .category-box {
     background: white;
-    padding: 17px;
+    padding: 14px;
     border-radius: 10px;
     margin: 15px 0;
 }
@@ -206,12 +211,18 @@ th { background: #f1f5f9; }
 
 .staff-history-row {
     display: grid;
-    grid-template-columns: 145px 100px minmax(150px, 1.5fr) 120px 90px 120px 110px;
+    grid-template-columns: 125px 105px minmax(170px, 1.3fr) minmax(220px, 1.7fr) 100px 70px minmax(130px, 1fr) 90px;
     align-items: center;
     gap: 12px;
     padding: 9px 2px;
     white-space: nowrap;
-    font-size: 13px;
+    font-size: 12px;
+}
+
+.staff-history-changes {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
 }
 
 .staff-history-header {
@@ -235,7 +246,7 @@ th { background: #f1f5f9; }
     }
 
     .staff-history-row {
-        min-width: 850px;
+        min-width: 1030px;
     }
 }
 
@@ -483,7 +494,7 @@ th { background: #f1f5f9; }
 
     .stats {
         grid-template-columns: 1fr 1fr;
-        gap: 9px;
+        gap: 8px;
     }
 
     .stat {
@@ -491,11 +502,11 @@ th { background: #f1f5f9; }
     }
 
     .stat h2 {
-        font-size: 23px;
+        font-size: 20px;
     }
 
     .card {
-        padding: 14px;
+        padding: 12px;
     }
 
     .product-result {
@@ -1165,11 +1176,11 @@ th { background: #f1f5f9; }
 <div class="history-heading">
     <div>
         <h2>Order History</h2>
-        <p class="small">Completed Stock OUT and Stock IN records. This history is not cleared automatically.</p>
+        <p class="small">Completed stock movements and orders cleared by Admin. Clearing this history also clears it for Co-Admin; Staff history is separate.</p>
     </div>
     <div class="history-actions">
-        <button class="green" onclick="downloadOrderHistoryExcel()">Download Excel</button>
-        <button class="red" onclick="clearOrderHistory()">Clear History</button>
+        <button id="downloadOrderHistoryButton" class="green" onclick="downloadOrderHistoryExcel()">Download Excel</button>
+        <button id="clearOrderHistoryButton" class="red" onclick="clearOrderHistory()">Clear History</button>
     </div>
 </div>
 
@@ -1200,7 +1211,7 @@ th { background: #f1f5f9; }
     <div class="staff-history-heading">
         <div>
             <h2>My Order History</h2>
-            <p class="small">Order history is automatically cleared 24 hours after submission.</p>
+            <p class="small">Your order history stays here until you clear it.</p>
         </div>
         <button class="red" onclick="clearStaffOrderHistory()">Clear History</button>
     </div>
@@ -1294,6 +1305,10 @@ function changeRole(assignedRole) {
     if (clearManagementButton) {
         clearManagementButton.style.display = role === "admin" ? "" : "none";
     }
+    ["downloadOrderHistoryButton", "clearOrderHistoryButton"].forEach(id => {
+        const button = document.getElementById(id);
+        if (button) button.style.display = role === "admin" ? "" : "none";
+    });
 
     document.querySelectorAll(".sidebar button").forEach(btn => {
 
@@ -2211,13 +2226,16 @@ function renderManagement() {
     }
 
     // Collect every order line, then group all lines by category.
+    const newestFirstOrders = [...orders].sort((a, b) =>
+        Number(b.createdAtValue || 0) - Number(a.createdAtValue || 0)
+    );
     const categories = [...new Set(
-        orders.flatMap(order => order.items.map(item => item.category))
-    )].sort((a, b) => a.localeCompare(b));
+        newestFirstOrders.flatMap(order => order.items.map(item => item.category))
+    )];
 
     container.innerHTML = categories.map(category => {
 
-        const categoryOrders = orders.filter(order =>
+        const categoryOrders = newestFirstOrders.filter(order =>
             order.items.some(item => item.category === category)
         );
 
@@ -2383,6 +2401,14 @@ function updateOrderQuantity(orderId, productId, value) {
 
     const previousQuantity = item.qty;
     item.qty = quantity;
+    item.quantityChanges = Array.isArray(item.quantityChanges) ? item.quantityChanges : [];
+    item.quantityChanges.push({
+        by: role === "coadmin" ? "Co-Admin" : "Admin",
+        from: previousQuantity,
+        to: quantity,
+        at: new Date().toLocaleString(),
+        atValue: Date.now()
+    });
     persistFirebase(window.firebaseData?.setOrder(order));
     addActivity(`Adjusted ${item.name} in ${orderId} from ${previousQuantity} to ${quantity}`);
     renderManagement();
@@ -2678,23 +2704,19 @@ function addActivity(message) {
 
 function renderStaffOrderHistory() {
 
-    const now = Date.now();
-    const expiryWindow = 24 * 60 * 60 * 1000;
-
-    // Only display orders created by Staff during the last 24 hours.
-    // The manual clear timestamp affects this page only, not Admin records.
-    const recentOrders = [...archivedOrders, ...orderHistory, ...orders]
+    // Staff history is independent of Admin/Co-Admin history and stays until
+    // Staff uses its own Clear History button.
+    const staffOrders = [...archivedOrders, ...orderHistory, ...orders]
         .filter(order =>
             order.createdBy === "STAFF" &&
             order.createdAtValue &&
-            order.createdAtValue > now - expiryWindow &&
             order.createdAtValue > staffHistoryClearedAt
         )
         .sort((a, b) => b.createdAtValue - a.createdAtValue);
 
     const rows = [];
 
-    recentOrders.forEach(order => {
+    staffOrders.forEach(order => {
         order.items.forEach(item => {
             rows.push({
                 date: order.date,
@@ -2703,6 +2725,7 @@ function renderStaffOrderHistory() {
                 productName: item.name,
                 category: item.category,
                 qty: item.qty,
+                quantityChanges: Array.isArray(item.quantityChanges) ? item.quantityChanges : [],
                 type: order.type,
                 customer: order.customer || "—",
                 status: item.status
@@ -2713,7 +2736,7 @@ function renderStaffOrderHistory() {
     const container = document.getElementById("staffOrderHistoryList");
 
     if (!rows.length) {
-        container.innerHTML = '<div class="small">No orders in the last 24 hours.</div>';
+        container.innerHTML = '<div class="small">No staff orders in history.</div>';
         return;
     }
 
@@ -2722,6 +2745,7 @@ function renderStaffOrderHistory() {
             <span>Date / Time</span>
             <span>Order ID</span>
             <span>Product</span>
+            <span>Quantity Changes</span>
             <span>Category</span>
             <span>Quantity</span>
             <span>Order Type</span>
@@ -2734,6 +2758,13 @@ function renderStaffOrderHistory() {
                 <span>${escapeHTML(item.orderId)}</span>
                 <span title="${escapeAttr(item.productName)}">
                     ${escapeHTML(item.productName)} (${escapeHTML(item.productId)})
+                </span>
+                <span class="staff-history-changes">
+                    ${item.quantityChanges.length
+                        ? item.quantityChanges.map(change =>
+                            `${escapeHTML(change.by || "Admin")} changed ${Number(change.from)} to ${Number(change.to)}`
+                          ).join(" · ")
+                        : "—"}
                 </span>
                 <span>${escapeHTML(item.category)}</span>
                 <span>${item.qty}</span>
@@ -2876,8 +2907,8 @@ function renderOrderHistory() {
 
 function downloadOrderHistoryExcel() {
 
-    if (role !== "admin" && role !== "coadmin") {
-        alert("Only Admin and Co-Admin can download Order History.");
+    if (role !== "admin") {
+        alert("Only Admin can download Order History.");
         return;
     }
 
@@ -2965,8 +2996,8 @@ function downloadOrderHistoryExcel() {
 
 function clearOrderHistory() {
 
-    if (role !== "admin" && role !== "coadmin") {
-        alert("Only Admin and Co-Admin can clear Order History.");
+    if (role !== "admin") {
+        alert("Only Admin can clear Order History.");
         return;
     }
 
