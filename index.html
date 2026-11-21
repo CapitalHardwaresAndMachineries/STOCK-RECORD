@@ -1113,9 +1113,9 @@ th { background: #f1f5f9; }
 <div class="management-heading">
     <div>
         <h2>Order Management</h2>
-        <p class="small">Orders and returns are removed from this page 24 hours after submission. Completed stock movements remain in Order History.</p>
+        <p class="small">Orders and returns stay here until an Admin or Co-Admin clears them. Cleared records remain in Order History.</p>
     </div>
-    <button class="red" onclick="clearOrderManagement()">Archive Orders &amp; Returns</button>
+    <button class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
 </div>
 
 <div id="orderList"></div>
@@ -1232,8 +1232,9 @@ let pendingProductImport = [];
 let productImportBusy = false;
 
 let orders = [];
-// Orders and returns cleared from management are archived so completed stock
-// movements remain available in Order History and recent staff history.
+// Cleared management records stay available to history pages in this collection.
+let orderHistory = [];
+// Legacy archived records remain readable for existing history.
 let archivedOrders = [];
 let cart = [];
 let returnCart = [];
@@ -2040,7 +2041,7 @@ function submitOrder() {
     let order = {
 
         id: "ORD-" +
-            String(orders.length + archivedOrders.length + 1).padStart(4,"0"),
+            String(orders.length + archivedOrders.length + orderHistory.length + 1).padStart(4,"0"),
 
         type,
         customer,
@@ -2086,31 +2087,7 @@ function submitOrder() {
 // ORDER MANAGEMENT
 // ======================================
 
-function archiveExpiredManagementOrders() {
-
-    const expiryWindow = 24 * 60 * 60 * 1000;
-    const cutoff = Date.now() - expiryWindow;
-
-    const expiredOrders = orders.filter(order =>
-        order.createdAtValue && order.createdAtValue <= cutoff
-    );
-
-    if (expiredOrders.length > 0) {
-        expiredOrders.forEach(order => persistFirebase(window.firebaseData?.archiveOrder(order)));
-        archivedOrders.push(...expiredOrders);
-        orders = orders.filter(order =>
-            !order.createdAtValue || order.createdAtValue > cutoff
-        );
-        updateDashboard();
-        renderOrderHistory();
-        if (role === "staff") renderStaffOrderHistory();
-    }
-
-    return expiredOrders.length;
-}
-
-
-function clearOrderManagement() {
+async function clearOrderManagement() {
 
     if (role !== "admin" && role !== "coadmin") {
         alert("Only Admin and Co-Admin can clear Order Management.");
@@ -2122,24 +2099,53 @@ function clearOrderManagement() {
         return;
     }
 
-    // Move current orders and returns to the archive instead of deleting them.
-    // This preserves completed stock movement history.
-    archivedOrders.push(...orders);
-    orders.forEach(order => persistFirebase(window.firebaseData?.archiveOrder(order)));
-    orders = [];
+    const recordsToClear = [...orders];
+    const confirmed = confirm(
+        `Clear ${recordsToClear.length} order(s) and return(s) from Order Management?\n\n` +
+        `They will be removed from the management list. Staff, Admin, and Co-Admin history will remain.`
+    );
+    if (!confirmed) return;
 
-    renderManagement();
-    updateDashboard();
-    renderOrderHistory();
+    if (!window.firebaseData?.moveOrdersToHistory) {
+        alert("Could not clear Order Management because Firebase is not ready.");
+        return;
+    }
 
-    alert("Order Management cleared. Completed stock movements are retained in Order History.");
+    const button = document.querySelector('button[onclick="clearOrderManagement()"]');
+    if (button) button.disabled = true;
+    try {
+        const movedIds = await window.firebaseData.moveOrdersToHistory(recordsToClear);
+        const moved = recordsToClear.filter(order => movedIds.includes(order.id));
+        orderHistory = [...orderHistory.filter(order => !movedIds.includes(order.id)), ...moved];
+        orders = orders.filter(order => !movedIds.includes(order.id));
+        renderManagement();
+        updateDashboard();
+        renderOrderHistory();
+        renderStaffOrderHistory();
+        alert(`Order Management cleared. ${movedIds.length} record(s) remain in Order History.`);
+    } catch (error) {
+        console.error("Could not clear Order Management:", error);
+        const movedIds = error.movedIds || [];
+        if (movedIds.length) {
+            const moved = recordsToClear.filter(order => movedIds.includes(order.id));
+            orderHistory = [...orderHistory.filter(order => !movedIds.includes(order.id)), ...moved];
+            orders = orders.filter(order => !movedIds.includes(order.id));
+            renderManagement();
+            updateDashboard();
+            renderOrderHistory();
+            renderStaffOrderHistory();
+        }
+        alert(movedIds.length
+            ? `Partially cleared ${movedIds.length} record(s). The remaining records are still in Order Management. Check Firestore rules and try again.`
+            : "Could not clear Order Management. Check Firestore rules and try again.");
+    } finally {
+        if (button) button.disabled = false;
+    }
 
 }
 
 
 function renderManagement() {
-
-    archiveExpiredManagementOrders();
 
     let container = document.getElementById("orderList");
     const canEditQuantities = role === "admin" || role === "coadmin";
@@ -2487,7 +2493,7 @@ function renderPopularItems(resetPage = false) {
             // One product counts once per order,
             // regardless of the quantity ordered.
 
-            let confirmedOrders = [...archivedOrders, ...orders].filter(order =>
+            let confirmedOrders = [...archivedOrders, ...orderHistory, ...orders].filter(order =>
                 order.kind !== "return" &&
                 order.items.some(item =>
 
@@ -2623,7 +2629,7 @@ function renderStaffOrderHistory() {
 
     // Only display orders created by Staff during the last 24 hours.
     // The manual clear timestamp affects this page only, not Admin records.
-    const recentOrders = [...archivedOrders, ...orders]
+    const recentOrders = [...archivedOrders, ...orderHistory, ...orders]
         .filter(order =>
             order.createdBy === "STAFF" &&
             order.createdAtValue &&
@@ -2704,7 +2710,7 @@ function getAdminOrderHistoryItems() {
 
     const historyItems = [];
 
-    [...archivedOrders, ...orders].forEach(order => {
+    [...archivedOrders, ...orderHistory, ...orders].forEach(order => {
         order.items.forEach(item => {
             if (item.status === "Completed") {
                 const completedAtValue =
@@ -2962,6 +2968,7 @@ function escapeAttr(value) {
 window.stockAppApplyFirebaseData = function(data) {
     if (Array.isArray(data.products)) products = data.products;
     if (Array.isArray(data.orders)) orders = data.orders;
+    if (Array.isArray(data.orderHistory)) orderHistory = data.orderHistory;
     if (Array.isArray(data.archivedOrders)) archivedOrders = data.archivedOrders;
     if (data.settings) {
         staffHistoryClearedAt = Number(data.settings.staffHistoryClearedAt || 0);
@@ -3051,12 +3058,9 @@ window.firebaseSignOut = function() {};
 // INITIALIZE
 // ======================================
 
-// Refresh the Staff history expiry while the page remains open.
-// Opening the page also checks the 24-hour expiry, including after browser closure.
+// Refresh Staff Order History while it is open. This does not remove orders
+// from Order Management; Admin and Co-Admin clear that page manually.
 setInterval(() => {
-    // Enforce the 24-hour Order Management expiry while the app is open.
-    if (role === "admin" || role === "coadmin") archiveExpiredManagementOrders();
-
     const staffHistoryPage = document.getElementById("staffhistory");
     if (
         role === "staff" &&
@@ -3142,6 +3146,26 @@ window.firebaseData = {
     return {added, skipped};
   }),
   setOrder: order => setDoc(doc(db, "orders", order.id), order),
+  moveOrdersToHistory: async ordersToMove => {
+    const movedIds = [];
+    try {
+      // Keep each batch small so Firestore rules can safely evaluate every write.
+      for (let start = 0; start < ordersToMove.length; start += 20) {
+        const chunk = ordersToMove.slice(start, start + 20);
+        const batch = writeBatch(db);
+        chunk.forEach(order => {
+          batch.set(doc(db, "orderHistory", order.id), order);
+          batch.delete(doc(db, "orders", order.id));
+        });
+        await batch.commit();
+        movedIds.push(...chunk.map(order => order.id));
+      }
+      return movedIds;
+    } catch (error) {
+      error.movedIds = movedIds;
+      throw error;
+    }
+  },
   archiveOrder: async order => {
     const batch = writeBatch(db);
     batch.set(doc(db, "archivedOrders", order.id), order);
@@ -3169,10 +3193,11 @@ function listenCollection(name, callback) {
 function startWorkspace(user, role) {
   clearListeners();
   window.stockAppSetRole(role, user.email);
-  const data = {products: [], orders: [], archivedOrders: [], settings: {}};
+  const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], settings: {}};
   const publish = () => window.stockAppApplyFirebaseData(data);
   listenCollection("products", rows => { data.products = rows; publish(); });
   listenCollection("orders", rows => { data.orders = rows; publish(); });
+  listenCollection("orderHistory", rows => { data.orderHistory = rows; publish(); });
   listenCollection("archivedOrders", rows => { data.archivedOrders = rows; publish(); });
   unsubscribeData.push(onSnapshot(doc(db, "appSettings", "history"), snapshot => {
     data.settings = snapshot.exists() ? snapshot.data() : {};
