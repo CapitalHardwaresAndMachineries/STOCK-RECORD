@@ -1120,7 +1120,7 @@ th { background: #f1f5f9; }
             <div class="order-items-title">Return Items</div>
             <div id="returnCart">No products added yet.</div>
             <div class="order-submit-row">
-                <button class="green" onclick="submitReturn()">Submit Return</button>
+                <button id="submitReturnButton" class="yellow" onclick="submitReturn()" disabled>Submit Return</button>
             </div>
         </div>
     </div>
@@ -1259,6 +1259,8 @@ let archivedOrders = [];
 let cart = [];
 let orderSubmittedAndLocked = false;
 let orderSubmissionInProgress = false;
+let returnSubmittedAndLocked = false;
+let returnSubmissionInProgress = false;
 let activeOrderSequence = 1;
 let orderSequenceReady = false;
 let returnCart = [];
@@ -1948,6 +1950,7 @@ function addToReturnCart(id) {
     } else {
         returnCart.push({...product, qty:quantity, note:""});
     }
+    if (returnSubmittedAndLocked) returnSubmittedAndLocked = false;
     renderReturnCart();
     searchReturnProducts();
 }
@@ -1970,6 +1973,17 @@ function renderReturnCart() {
                       oninput="updateReturnNote(${index},this.value)">${escapeHTML(product.note || "")}</textarea>
         </div>
     `).join("") || '<div class="small">No products added yet.</div>';
+    updateReturnSubmitButton();
+}
+
+function updateReturnSubmitButton() {
+    const button = document.getElementById("submitReturnButton");
+    if (!button) return;
+    const submitted = returnSubmittedAndLocked;
+    button.classList.toggle("green", submitted);
+    button.classList.toggle("yellow", !submitted);
+    button.textContent = submitted ? "Submitted ✓" : "Submit Return";
+    button.disabled = submitted || returnSubmissionInProgress || returnCart.length === 0 || !orderSequenceReady;
 }
 
 
@@ -1997,7 +2011,8 @@ function removeReturnCart(index) {
 }
 
 
-function submitReturn() {
+async function submitReturn() {
+    if (returnSubmissionInProgress || returnSubmittedAndLocked) return;
     if (!['admin', 'coadmin', 'staff'].includes(role)) {
         alert("Your account cannot submit a return.");
         return;
@@ -2044,8 +2059,21 @@ function submitReturn() {
         }))
     };
 
+    returnSubmissionInProgress = true;
+    updateReturnSubmitButton();
+    try {
+        if (!window.firebaseData?.setOrder) throw new Error("Firebase is not ready.");
+        await window.firebaseData.setOrder(order);
+    } catch (error) {
+        console.error("Could not submit return:", error);
+        returnSubmissionInProgress = false;
+        updateReturnSubmitButton();
+        alert("The return could not be submitted. Check your connection and try again.");
+        return;
+    }
+    returnSubmissionInProgress = false;
     orders.push(order);
-    persistFirebase(window.firebaseData?.setOrder(order));
+    returnSubmittedAndLocked = true;
     addActivity("Submitted return " + order.id);
     returnCart = [];
     renderReturnCart();
@@ -3082,6 +3110,7 @@ window.stockAppApplyFirebaseData = function(data) {
     if (data.settingsReady) {
         orderSequenceReady = true;
         updateOrderSubmitButton();
+      updateReturnSubmitButton();
     }
     if (document.getElementById("stockApp").style.display !== "none") {
         renderInventory();
@@ -3311,6 +3340,7 @@ function startWorkspace(user, role) {
   clearListeners();
   orderSequenceReady = false;
   updateOrderSubmitButton();
+  updateReturnSubmitButton();
   window.stockAppSetRole(role, user.email);
   const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], settings: {}, settingsReady: false};
   const publish = () => window.stockAppApplyFirebaseData(data);
@@ -3335,6 +3365,7 @@ onAuthStateChanged(auth, async user => {
     clearListeners();
     orderSequenceReady = false;
     updateOrderSubmitButton();
+    updateReturnSubmitButton();
     window.stockAppShowLogin(signOutMessage);
     signOutMessage = "";
     return;
