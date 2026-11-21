@@ -132,6 +132,16 @@ button:disabled {
     width: 100%;
 }
 
+.inventory-update-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.inventory-update-actions button {
+    min-width: 110px;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
@@ -924,7 +934,7 @@ th { background: #f1f5f9; }
     <h3>Most Ordered Items</h3>
 
     <p class="small">
-        All-time confirmed orders only
+        Completed Stock OUT units minus completed Stock IN returns
     </p>
 
     <label>Select Category</label>
@@ -947,7 +957,7 @@ th { background: #f1f5f9; }
                 <tr>
                     <th>Item Name</th>
                     <th>Product Code</th>
-                    <th>Confirmed Orders</th>
+                    <th>Net Units Out</th>
                 </tr>
             </thead>
 
@@ -991,31 +1001,18 @@ th { background: #f1f5f9; }
        placeholder="Search Product ID, Name or Category..."
        oninput="inventoryPage=1;renderInventory()">
 
-<div id="adminProductForm"
+<div id="adminInventoryTools"
      class="card"
      style="display:none">
 
-    <h3>Add New Product</h3>
-
-    <input id="newID" placeholder="Product ID">
-    <input id="newName" placeholder="Product Name">
-    <input id="newCategory" placeholder="Category">
-    <input id="newStock"
-           type="number"
-           min="0"
-           placeholder="Opening Stock">
-
-    <button onclick="addProduct()">
-        Add Product
-    </button>
-
-    <hr>
-    <h3>Import Products from Excel</h3>
-    <p class="small">Choose an .xlsx file. The first sheet must have Product ID, Product Name, Category, and Opening Stock columns. Existing product IDs will be skipped, not overwritten.</p>
-    <input id="productImportFile" type="file" accept=".xlsx,.xls" aria-label="Choose Excel stock file" onchange="resetProductImportPreview()">
-    <button type="button" onclick="previewProductImport()">Preview File</button>
+    <h3>Update Inventory from Excel</h3>
+    <p class="small">Choose a workbook with Product ID, Product Name, Category, and Current Stock columns. Update replaces the current inventory with the rows in that file.</p>
+    <input id="productImportFile" type="file" accept=".xlsx,.xls" aria-label="Choose Excel stock file" onchange="showSelectedInventoryFile()">
+    <div class="inventory-update-actions">
+        <button id="updateInventoryButton" class="yellow" type="button" onclick="updateInventoryFromFile()">Update</button>
+        <button id="downloadCurrentStockButton" class="green" type="button" onclick="downloadCurrentStock()">Download</button>
+    </div>
     <div id="productImportStatus" class="small" role="status" aria-live="polite" style="margin-top:10px"></div>
-    <button id="productImportButton" type="button" style="display:none" onclick="importPendingProducts()">Import Products</button>
 
 </div>
 
@@ -1248,12 +1245,13 @@ let products = [
     {id:"P012",name:"USB Adapter",category:"Accessories",stock:45}
 ];
 window.productDataReady = false;
-let pendingProductImport = [];
-let productImportBusy = false;
+let productUpdateBusy = false;
 
 let orders = [];
 // Cleared management records stay available to history pages in this collection.
 let orderHistory = [];
+// Immutable stock movements keep Stock OUT entries when a later return adds Stock IN.
+let stockMovementHistory = [];
 // Legacy archived records remain readable for existing history.
 let archivedOrders = [];
 let cart = [];
@@ -1301,7 +1299,7 @@ function changeRole(assignedRole) {
 
     if (assignedRole) role = assignedRole;
 
-    document.getElementById("adminProductForm").style.display =
+    document.getElementById("adminInventoryTools").style.display =
         role === "admin" ? "block" : "none";
     const clearManagementButton = document.getElementById("clearManagementButton");
     if (clearManagementButton) {
@@ -1523,68 +1521,77 @@ function stockChange(id, type) {
 
 
 // ======================================
-// ADD PRODUCT
+// EXCEL INVENTORY REPLACEMENT
 // ======================================
 
-function addProduct() {
-
-    if (role !== "admin") return;
-
-    let id = document.getElementById("newID").value.trim();
-    let name = document.getElementById("newName").value.trim();
-    let category = document.getElementById("newCategory").value.trim();
-    let stock = Number(document.getElementById("newStock").value);
-
-    if (
-        !id || !name || !category ||
-        !Number.isInteger(stock) || stock < 0
-    ) {
-        alert("Enter valid product details.");
-        return;
-    }
-
-    if (products.some(p =>
-        p.id.toLowerCase() === id.toLowerCase()
-    )) {
-        alert("Product ID already exists.");
-        return;
-    }
-
-    products.push({id,name,category,stock});
-    persistFirebase(window.firebaseData?.setProduct({id,name,category,stock}));
-
-    addActivity("Added product " + name);
-
-    document.getElementById("newID").value = "";
-    document.getElementById("newName").value = "";
-    document.getElementById("newCategory").value = "";
-    document.getElementById("newStock").value = "";
-
-    renderInventory();
-    updateDashboard();
-
-}
-
-
-function resetProductImportPreview() {
-    pendingProductImport = [];
-    document.getElementById("productImportStatus").textContent = "";
-    document.getElementById("productImportButton").style.display = "none";
-}
-
-
-function previewProductImport() {
-    const status = document.getElementById("productImportStatus");
-    const importButton = document.getElementById("productImportButton");
+function showSelectedInventoryFile() {
     const file = document.getElementById("productImportFile").files[0];
-    resetProductImportPreview();
+    document.getElementById("productImportStatus").textContent = file
+        ? `Selected: ${file.name}`
+        : "";
+}
 
-    if (role !== "admin") {
-        status.textContent = "Only Admin can import products.";
-        return;
+async function readInventoryWorkbook(file) {
+    const workbook = window.XLSX.read(await file.arrayBuffer(), {type:"array", cellText:true});
+    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+    if (!firstSheet) throw new Error("The workbook has no worksheets.");
+    const rows = window.XLSX.utils.sheet_to_json(firstSheet, {
+        header:1, raw:false, defval:"", blankrows:true
+    });
+    if (!rows.length) throw new Error("The first worksheet is empty.");
+
+    const normalizeHeader = value => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+    const headers = rows[0].map(normalizeHeader);
+    const stockColumn = headers.includes("currentstock")
+        ? headers.indexOf("currentstock")
+        : headers.indexOf("openingstock");
+    const columns = {
+        id: headers.indexOf("productid"),
+        name: headers.indexOf("productname"),
+        category: headers.indexOf("category"),
+        stock: stockColumn
+    };
+    if (Object.values(columns).some(index => index < 0)) {
+        throw new Error("Row 1 must contain Product ID, Product Name, Category, and Current Stock (or Opening Stock) headers.");
     }
+
+    const fileIds = new Set();
+    const parsedProducts = [];
+    const errors = [];
+    for (let index = 1; index < rows.length; index++) {
+        const row = rows[index];
+        if (row.every(value => String(value || "").trim() === "")) continue;
+        const rowNumber = index + 1;
+        const id = String(row[columns.id] ?? "").trim();
+        const name = String(row[columns.name] ?? "").trim();
+        const category = String(row[columns.category] ?? "").trim();
+        const stockText = String(row[columns.stock] ?? "").trim().replace(/,/g, "");
+        const stock = Number(stockText);
+        let issue = "";
+        if (!id || !name || !category) issue = "missing Product ID, Product Name, or Category";
+        else if (fileIds.has(id.toLowerCase())) issue = `duplicate Product ID ${id} in the file`;
+        else if (!stockText || !Number.isSafeInteger(stock) || stock < 0) issue = "Current Stock must be a whole number zero or greater";
+        if (issue) {
+            errors.push(`Row ${rowNumber}: ${issue}`);
+            continue;
+        }
+        fileIds.add(id.toLowerCase());
+        parsedProducts.push({id, name, category, stock});
+    }
+    if (errors.length) {
+        throw new Error(`Found ${errors.length} problem${errors.length === 1 ? "" : "s"}. Fix the workbook and select it again. ${errors.slice(0, 8).join("; ")}${errors.length > 8 ? "; …" : ""}`);
+    }
+    if (!parsedProducts.length) throw new Error("The workbook has no product rows. Current inventory was not changed.");
+    return parsedProducts;
+}
+
+async function updateInventoryFromFile() {
+    const status = document.getElementById("productImportStatus");
+    const updateButton = document.getElementById("updateInventoryButton");
+    const file = document.getElementById("productImportFile").files[0];
+    if (role !== "admin" || productUpdateBusy) return;
     if (!window.productDataReady) {
-        status.textContent = "Inventory is still loading. Wait a moment, then preview the file again.";
+        status.textContent = "Inventory is still loading. Wait a moment and try again.";
         return;
     }
     if (!file) {
@@ -1596,118 +1603,75 @@ function previewProductImport() {
         return;
     }
 
-    status.textContent = "Reading file…";
-    const readFile = async () => {
-        const workbook = window.XLSX.read(await file.arrayBuffer(), {type:"array", cellText:true});
-        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-        if (!firstSheet) throw new Error("The workbook has no worksheets.");
-        const rows = window.XLSX.utils.sheet_to_json(firstSheet, {
-            header:1, raw:false, defval:"", blankrows:true
-        });
-        if (!rows.length) throw new Error("The first worksheet is empty.");
-
-        const normalizeHeader = value => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-        const headers = rows[0].map(normalizeHeader);
-        const columns = {
-            id: headers.indexOf("productid"),
-            name: headers.indexOf("productname"),
-            category: headers.indexOf("category"),
-            stock: headers.indexOf("openingstock")
-        };
-        if (Object.values(columns).some(index => index < 0)) {
-            throw new Error("Row 1 must contain Product ID, Product Name, Category, and Opening Stock headers.");
-        }
-
-        const existingIds = new Set(products.map(product => String(product.id).trim().toLowerCase()));
-        const fileIds = new Set();
-        const newProducts = [];
-        const errors = [];
-        let existingCount = 0;
-
-        for (let index = 1; index < rows.length; index++) {
-            const row = rows[index];
-            if (row.every(value => String(value || "").trim() === "")) continue;
-
-            const rowNumber = index + 1;
-            const id = String(row[columns.id] ?? "").trim();
-            const name = String(row[columns.name] ?? "").trim();
-            const category = String(row[columns.category] ?? "").trim();
-            const stockText = String(row[columns.stock] ?? "").trim().replace(/,/g, "");
-            const stock = Number(stockText);
-            let issue = "";
-
-            if (!id || !name || !category) issue = "missing Product ID, Product Name, or Category";
-            else if (fileIds.has(id.toLowerCase())) issue = `duplicate Product ID ${id} in the file`;
-            else if (!stockText || !Number.isSafeInteger(stock) || stock < 0) issue = "Opening Stock must be a whole number zero or greater";
-
-            if (issue) {
-                errors.push(`Row ${rowNumber}: ${issue}`);
-                continue;
-            }
-
-            fileIds.add(id.toLowerCase());
-            if (existingIds.has(id.toLowerCase())) {
-                existingCount++;
-                continue;
-            }
-            newProducts.push({id, name, category, stock});
-        }
-
-        if (errors.length) {
-            status.textContent = `Found ${errors.length} problem${errors.length === 1 ? "" : "s"}. Fix the file and preview it again. ${errors.slice(0, 8).join("; ")}${errors.length > 8 ? "; …" : ""}`;
+    productUpdateBusy = true;
+    updateButton.disabled = true;
+    document.getElementById("downloadCurrentStockButton").disabled = true;
+    document.getElementById("productImportFile").disabled = true;
+    try {
+        status.textContent = "Checking workbook…";
+        const incomingProducts = await readInventoryWorkbook(file);
+        const currentCount = products.length;
+        const confirmUpdate = confirm(
+            `Replace the current inventory (${currentCount} products) with ${incomingProducts.length} products from this workbook?\n\n` +
+            `Matching Product IDs will be updated. Product IDs missing from the workbook will be removed.`
+        );
+        if (!confirmUpdate) {
+            status.textContent = "Update cancelled. Current inventory was not changed.";
             return;
         }
-        pendingProductImport = newProducts;
-        status.textContent = `Ready to add ${newProducts.length} product${newProducts.length === 1 ? "" : "s"}. ${existingCount} ID${existingCount === 1 ? "" : "s"} already in inventory will be skipped.`;
-        if (newProducts.length) {
-            importButton.textContent = `Import ${newProducts.length} Products`;
-            importButton.style.display = "inline-block";
+        if (!window.firebaseData?.replaceProductInventory) {
+            throw new Error("Firebase is not ready. Refresh the page and try again.");
         }
-    };
 
-    readFile().catch(error => {
-        console.error("Could not preview product workbook:", error);
-        status.textContent = error.message || "Could not read the Excel file.";
-    });
+        const currentIds = products.map(product => product.id);
+        const result = await window.firebaseData.replaceProductInventory(
+            incomingProducts,
+            currentIds,
+            progress => { status.textContent = progress; }
+        );
+        products = incomingProducts;
+        inventoryPage = 1;
+        document.getElementById("inventorySearch").value = "";
+        document.getElementById("productImportFile").value = "";
+        renderInventory();
+        updateDashboard();
+        status.textContent = `Inventory updated: ${result.updated} rows saved; ${result.removed} old products removed.`;
+    } catch (error) {
+        console.error("Inventory replacement stopped:", error);
+        status.textContent = error.message || "Could not update inventory. Check Firebase access and try again.";
+    } finally {
+        productUpdateBusy = false;
+        updateButton.disabled = false;
+        document.getElementById("downloadCurrentStockButton").disabled = false;
+        document.getElementById("productImportFile").disabled = false;
+    }
 }
 
-
-async function importPendingProducts() {
+function downloadCurrentStock() {
     const status = document.getElementById("productImportStatus");
-    const importButton = document.getElementById("productImportButton");
-    if (role !== "admin" || productImportBusy || !pendingProductImport.length) return;
-    if (!window.firebaseData?.importProductBatch) {
-        status.textContent = "Firebase is not ready. Refresh the page and try again.";
+    if (role !== "admin") {
+        alert("Only Admin can download the stock workbook.");
         return;
     }
-    const total = pendingProductImport.length;
-    if (!confirm(`Import ${total} new products into Firebase? Existing product IDs will be skipped.`)) return;
-
-    productImportBusy = true;
-    importButton.disabled = true;
-    let processed = 0;
-    let added = 0;
-    let skipped = 0;
-    try {
-        for (let offset = 0; offset < total; offset += 200) {
-            const chunk = pendingProductImport.slice(offset, offset + 200);
-            const result = await window.firebaseData.importProductBatch(chunk);
-            added += result.added;
-            skipped += result.skipped;
-            processed += chunk.length;
-            status.textContent = `Saving products… ${processed} of ${total}`;
-        }
-        status.textContent = `Import complete. Added ${added} products. Skipped ${skipped} IDs that already existed.`;
-        pendingProductImport = [];
-        importButton.style.display = "none";
-        document.getElementById("productImportFile").value = "";
-    } catch (error) {
-        console.error("Product import stopped:", error);
-        status.textContent = `Import stopped after ${processed} of ${total} rows. Earlier batches may have saved. Preview the same file again to skip saved IDs and retry. ${error.code || error.message || "Check Firebase access."}`;
-    } finally {
-        productImportBusy = false;
-        importButton.disabled = false;
+    if (!window.productDataReady) {
+        status.textContent = "Inventory is still loading. Wait a moment and try again.";
+        return;
     }
+    if (!window.XLSX) {
+        status.textContent = "The Excel writer did not load. Check your connection and refresh the page.";
+        return;
+    }
+    const rows = [
+        ["Product ID", "Product Name", "Category", "Current Stock"],
+        ...[...products]
+            .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, {numeric:true}))
+            .map(product => [String(product.id), product.name, product.category, Number(product.stock) || 0])
+    ];
+    const sheet = window.XLSX.utils.aoa_to_sheet(rows);
+    const workbook = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(workbook, sheet, "Current Stock");
+    window.XLSX.writeFile(workbook, "Current_Stock.xlsx");
+    status.textContent = `Downloaded ${products.length} current products. Edit this file and use Update to replace inventory.`;
 }
 
 
@@ -2449,7 +2413,7 @@ function updateOrderQuantity(orderId, productId, value) {
 }
 
 
-function stockOutItem(orderId, productId) {
+async function stockOutItem(orderId, productId) {
 
     if (role !== "admin") {
         alert("Only Admin can process Stock OUT.");
@@ -2465,21 +2429,26 @@ function stockOutItem(orderId, productId) {
         return;
     }
 
-    const product = products.find(p => p.id === item.id);
-    if (!product || item.qty > product.stock) {
-        alert("Insufficient stock for " + item.name);
+    let completed;
+    try {
+        completed = await window.firebaseData.completeStockOut(orderId, productId);
+    } catch (error) {
+        console.error("Could not process stock out:", error);
+        alert(error.message || "Could not process this stock out. Refresh the page and try again.");
         return;
     }
 
-    product.stock -= item.qty;
-    item.status = "Completed";
-    item.completedAt = new Date().toLocaleString();
-    item.completedAtValue = Date.now();
-    persistFirebase(window.firebaseData?.setProduct(product));
-    persistFirebase(window.firebaseData?.setOrder(order));
+    const localProduct = products.find(p => p.id === productId);
+    if (localProduct) localProduct.stock = completed.product.stock;
+    const localOrder = orders.find(current => orderRecordKey(current) === orderId);
+    if (localOrder) Object.assign(localOrder, completed.order);
+    stockMovementHistory = [
+        completed.historyEvent,
+        ...stockMovementHistory.filter(event => event.id !== completed.historyEvent.id)
+    ];
 
     historyPage = 1;
-    addActivity("Stock OUT: " + item.name + " × " + item.qty);
+    addActivity("Stock OUT: " + completed.historyEvent.productName + " × " + completed.historyEvent.qty);
 
     renderManagement();
     renderInventory();
@@ -2516,6 +2485,10 @@ async function stockInReturn(orderId, productId) {
     const localOrder = orders.find(current => orderRecordKey(current) === orderId);
     if (localOrder) Object.assign(localOrder, completed.order);
     const completedItem = completed.order.items.find(current => current.id === productId);
+    stockMovementHistory = [
+        completed.historyEvent,
+        ...stockMovementHistory.filter(event => event.id !== completed.historyEvent.id)
+    ];
 
     historyPage = 1;
     addActivity("Stock IN return: " + completedItem.name + " × " + completedItem.qty);
@@ -2581,7 +2554,7 @@ function updateDashboard() {
 // ======================================
 // MOST ORDERED ITEMS
 // 10 ITEMS PER PAGE
-// COMPLETED ORDERS ONLY
+// COMPLETED STOCK MOVEMENTS, NET OF RETURNS
 // ======================================
 
 function renderPopularItems(resetPage = false) {
@@ -2593,6 +2566,37 @@ function renderPopularItems(resetPage = false) {
     const category =
         document.getElementById("dashboardCategory").value;
 
+    const netUnitsByProduct = new Map();
+    const addNetUnits = (productId, amount) => {
+        netUnitsByProduct.set(productId, (netUnitsByProduct.get(productId) || 0) + amount);
+    };
+    const recordedEventIds = new Set(stockMovementHistory.map(event => event.id));
+    const recordedOrderItems = new Set(stockMovementHistory.map(event =>
+        `${event.orderRecordId}:${event.productId}`
+    ));
+
+    stockMovementHistory.forEach(event => {
+        if (event.status !== "Completed") return;
+        if (event.movement === "Stock OUT") addNetUnits(event.productId, Number(event.qty || 0));
+        if (event.movement === "Stock IN") addNetUnits(event.productId, -Number(event.qty || 0));
+    });
+
+    const allOrders = new Map();
+    [...archivedOrders, ...orderHistory, ...orders].forEach(order => {
+        allOrders.set(orderRecordKey(order), order);
+    });
+    allOrders.forEach(order => {
+        order.items.forEach(item => {
+            if (item.status !== "Completed") return;
+            const hasMovementEvent = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
+                recordedOrderItems.has(`${orderRecordKey(order)}:${item.id}`);
+            if (item.historyEventId || hasMovementEvent) return;
+            addNetUnits(item.id, order.kind === "return"
+                ? -Number(item.qty || 0)
+                : Number(item.qty || 0));
+        });
+    });
+
     let results = products
 
         .filter(p =>
@@ -2601,31 +2605,15 @@ function renderPopularItems(resetPage = false) {
         )
 
         .map(p => {
-
-            // Count completed orders containing this product.
-            // One product counts once per order,
-            // regardless of the quantity ordered.
-
-            let confirmedOrders = [...archivedOrders, ...orderHistory, ...orders].filter(order =>
-                order.kind !== "return" &&
-                order.items.some(item =>
-
-                    item.id === p.id &&
-                    item.status === "Completed"
-
-                )
-
-            ).length;
-
             return {
                 name:p.name,
                 id:p.id,
-                count:confirmedOrders
+                count:Math.max(0, netUnitsByProduct.get(p.id) || 0)
             };
 
         });
 
-    // Highest confirmed order count first.
+    // Highest net Stock OUT units first.
     // Product name breaks ties.
 
     results.sort((a,b) => {
@@ -2828,43 +2816,53 @@ function clearStaffOrderHistory() {
 
 function getAdminOrderHistoryItems() {
 
-    const historyItems = [];
+    const historyItems = stockMovementHistory
+        .filter(event => Number(event.completedAtValue || 0) > adminHistoryClearedAt)
+        .map(event => ({...event}));
+    const recordedEventIds = new Set(stockMovementHistory.map(event => event.id));
+    const recordedOrderItems = new Set(stockMovementHistory.map(event =>
+        `${event.orderRecordId}:${event.productId}`
+    ));
 
+    // Keep a fallback for older completed orders created before immutable
+    // stock movement records were added, plus orders cleared before processing.
     [
         ...archivedOrders.map(order => ({...order, retainedInHistory:true})),
         ...orderHistory.map(order => ({...order, retainedInHistory:true})),
         ...orders
     ].forEach(order => {
         order.items.forEach(item => {
-            if (item.status === "Completed" || order.retainedInHistory) {
-                const historyDateValue =
-                    item.completedAtValue ||
-                    Date.parse(item.completedAt || "") ||
-                    order.createdAtValue ||
-                    Date.parse(order.date || "") ||
-                    0;
+            const hasImmutableMovement = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
+                recordedOrderItems.has(`${orderRecordKey(order)}:${item.id}`);
+            if (item.status === "Completed" && item.historyEventId && !recordedEventIds.has(item.historyEventId)) return;
+            if (item.status === "Completed" && hasImmutableMovement) return;
+            if (item.status !== "Completed" && !order.retainedInHistory) return;
 
-                // The separate History clear control hides entries dated before its timestamp.
-                if (historyDateValue <= adminHistoryClearedAt) return;
+            const historyDateValue =
+                item.completedAtValue ||
+                Date.parse(item.completedAt || "") ||
+                order.createdAtValue ||
+                Date.parse(order.date || "") ||
+                0;
+            if (historyDateValue <= adminHistoryClearedAt) return;
 
-                historyItems.push({
-                    orderId: order.id,
-                    type: order.type,
-                    movement: item.status === "Completed"
-                        ? (order.kind === "return" ? "Stock IN" : "Stock OUT")
-                        : (order.kind === "return" ? "Cleared Return" : "Cleared Order"),
-                    status: item.status,
-                    createdBy: order.createdBy,
-                    orderDate: order.date,
-                    customer: order.customer,
-                    productId: item.id,
-                    productName: item.name,
-                    category: item.category,
-                    qty: item.qty,
-                    completedAt: item.completedAt || order.date,
-                    completedAtValue: historyDateValue
-                });
-            }
+            historyItems.push({
+                orderId: order.id,
+                type: order.type,
+                movement: item.status === "Completed"
+                    ? (order.kind === "return" ? "Stock IN" : "Stock OUT")
+                    : (order.kind === "return" ? "Cleared Return" : "Cleared Order"),
+                status: item.status,
+                createdBy: order.createdBy,
+                orderDate: order.date,
+                customer: order.customer,
+                productId: item.id,
+                productName: item.name,
+                category: item.category,
+                qty: item.qty,
+                completedAt: item.completedAt || order.date,
+                completedAtValue: historyDateValue
+            });
         });
     });
 
@@ -3102,6 +3100,7 @@ window.stockAppApplyFirebaseData = function(data) {
     if (Array.isArray(data.orders)) orders = data.orders;
     if (Array.isArray(data.orderHistory)) orderHistory = data.orderHistory;
     if (Array.isArray(data.archivedOrders)) archivedOrders = data.archivedOrders;
+    if (Array.isArray(data.stockMovementHistory)) stockMovementHistory = data.stockMovementHistory;
     if (data.settingsReady && data.settings) {
         staffHistoryClearedAt = Number(data.settings.staffHistoryClearedAt || 0);
         adminHistoryClearedAt = Number(data.settings.adminHistoryClearedAt || 0);
@@ -3233,10 +3232,71 @@ const db = getFirestore(firebaseApp);
 let unsubscribeData = [];
 let signOutMessage = "";
 
+function makeMovementEventId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 window.firebaseSignIn = (email, password) => signInWithEmailAndPassword(auth, email, password);
 window.firebaseSignOut = () => signOut(auth);
 window.firebaseData = {
   setProduct: product => setDoc(doc(db, "products", product.id), product),
+  completeStockOut: (orderId, productId) => runTransaction(db, async transaction => {
+    const orderRef = doc(db, "orders", orderId);
+    const productRef = doc(db, "products", productId);
+    const [orderSnapshot, productSnapshot] = await Promise.all([
+      transaction.get(orderRef),
+      transaction.get(productRef)
+    ]);
+    if (!orderSnapshot.exists() || !productSnapshot.exists()) {
+      throw new Error("The order or product could not be found.");
+    }
+
+    const orderData = orderSnapshot.data();
+    const productData = productSnapshot.data();
+    const item = orderData.items?.find(entry => entry.id === productId);
+    if (!item || orderData.kind === "return") {
+      throw new Error("This is not a valid stock out item.");
+    }
+    if (item.status !== "Approved" || item.historyEventId) {
+      throw new Error("This item is not approved or its Stock OUT is already recorded.");
+    }
+
+    const quantity = Number(item.qty);
+    const currentStock = Number(productData.stock || 0);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > currentStock) {
+      throw new Error("The requested quantity is invalid or exceeds available stock.");
+    }
+
+    const completedAt = new Date().toLocaleString();
+    const completedAtValue = Date.now();
+    const eventId = makeMovementEventId("OUT");
+    const historyEvent = {
+      id: eventId,
+      orderId: orderData.id || orderId,
+      orderRecordId: orderId,
+      movement: "Stock OUT",
+      status: "Completed",
+      type: orderData.type || "",
+      customer: orderData.customer || "",
+      createdBy: orderData.createdBy || "",
+      productId: item.id,
+      productName: item.name,
+      category: item.category,
+      qty: quantity,
+      completedAt,
+      completedAtValue
+    };
+
+    productData.stock = currentStock - quantity;
+    item.status = "Completed";
+    item.completedAt = completedAt;
+    item.completedAtValue = completedAtValue;
+    item.historyEventId = eventId;
+    transaction.set(productRef, productData);
+    transaction.set(orderRef, orderData);
+    transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
+    return {product:productData, order:orderData, historyEvent};
+  }),
   completeReturn: (orderId, productId) => runTransaction(db, async transaction => {
     const orderRef = doc(db, "orders", orderId);
     const productRef = doc(db, "products", productId);
@@ -3256,33 +3316,76 @@ window.firebaseData = {
     if (returnItem.status !== "Approved") {
       throw new Error("The return item must first be marked Approved.");
     }
+    if (returnItem.historyEventId) {
+      throw new Error("This Stock IN is already recorded.");
+    }
     const quantity = Number(returnItem.qty);
     if (!Number.isSafeInteger(quantity) || quantity < 1) {
       throw new Error("The return quantity is invalid.");
     }
+    const completedAt = new Date().toLocaleString();
+    const completedAtValue = Date.now();
+    const eventId = makeMovementEventId("IN");
+    const historyEvent = {
+      id: eventId,
+      orderId: orderData.id || orderId,
+      orderRecordId: orderId,
+      movement: "Stock IN",
+      status: "Completed",
+      type: orderData.type || "",
+      customer: orderData.customer || "",
+      createdBy: orderData.createdBy || "",
+      productId: returnItem.id,
+      productName: returnItem.name,
+      category: returnItem.category,
+      qty: quantity,
+      completedAt,
+      completedAtValue
+    };
+
     productData.stock = Number(productData.stock || 0) + quantity;
     returnItem.status = "Completed";
-    returnItem.completedAt = new Date().toLocaleString();
-    returnItem.completedAtValue = Date.now();
+    returnItem.completedAt = completedAt;
+    returnItem.completedAtValue = completedAtValue;
+    returnItem.historyEventId = eventId;
     transaction.set(productRef, productData);
     transaction.set(orderRef, orderData);
-    return {product:productData, order:orderData};
+    transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
+    return {product:productData, order:orderData, historyEvent};
   }),
-  importProductBatch: async productsToImport => runTransaction(db, async transaction => {
-    const refs = productsToImport.map(product => doc(db, "products", product.id));
-    const snapshots = await Promise.all(refs.map(reference => transaction.get(reference)));
-    let added = 0;
-    let skipped = 0;
-    snapshots.forEach((snapshot, index) => {
-      if (snapshot.exists()) {
-        skipped++;
-      } else {
-        transaction.set(refs[index], productsToImport[index]);
-        added++;
+  replaceProductInventory: async (productsToSave, existingIds, onProgress) => {
+    const newIds = new Set(productsToSave.map(product => product.id));
+    const removedIds = existingIds.filter(id => !newIds.has(id));
+    const chunkSize = 300;
+    let saved = 0;
+    let removed = 0;
+
+    try {
+      // Save every incoming row first, so old-only rows are not deleted
+      // before the replacement data has been uploaded successfully.
+      for (let offset = 0; offset < productsToSave.length; offset += chunkSize) {
+        const chunk = productsToSave.slice(offset, offset + chunkSize);
+        const batch = writeBatch(db);
+        chunk.forEach(product => batch.set(doc(db, "products", product.id), product));
+        await batch.commit();
+        saved += chunk.length;
+        if (onProgress) onProgress(`Saving workbook rows… ${saved} of ${productsToSave.length}`);
       }
-    });
-    return {added, skipped};
-  }),
+
+      for (let offset = 0; offset < removedIds.length; offset += chunkSize) {
+        const chunk = removedIds.slice(offset, offset + chunkSize);
+        const batch = writeBatch(db);
+        chunk.forEach(id => batch.delete(doc(db, "products", id)));
+        await batch.commit();
+        removed += chunk.length;
+        if (onProgress) onProgress(`Removing products not in the workbook… ${removed} of ${removedIds.length}`);
+      }
+      return {updated:saved, removed};
+    } catch (error) {
+      error.message = `Inventory replacement stopped after saving ${saved} workbook rows and removing ${removed} old products. Select the same workbook and press Update again to finish. ${error.message || "Check Firebase access."}`;
+      throw error;
+    }
+  },
   setOrder: order => setDoc(doc(db, "orders", order.recordId || order.docId || order.id), order),
   clearOrdersAndAdvanceSequence: async ordersToMove => {
     const movedIds = [];
@@ -3326,7 +3429,7 @@ function listenCollection(name, callback) {
     if (name === "products") window.productDataReady = true;
     callback(snapshot.docs.map(item => {
       const saved = item.data();
-      return ["orders", "orderHistory", "archivedOrders"].includes(name)
+      return ["orders", "orderHistory", "archivedOrders", "stockMovementHistory"].includes(name)
         ? {...saved, id: saved.id || item.id, docId: item.id}
         : {...saved, id: item.id};
     }));
@@ -3342,12 +3445,13 @@ function startWorkspace(user, role) {
   updateOrderSubmitButton();
   updateReturnSubmitButton();
   window.stockAppSetRole(role, user.email);
-  const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], settings: {}, settingsReady: false};
+  const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], stockMovementHistory: [], settings: {}, settingsReady: false};
   const publish = () => window.stockAppApplyFirebaseData(data);
   listenCollection("products", rows => { data.products = rows; publish(); });
   listenCollection("orders", rows => { data.orders = rows; publish(); });
   listenCollection("orderHistory", rows => { data.orderHistory = rows; publish(); });
   listenCollection("archivedOrders", rows => { data.archivedOrders = rows; publish(); });
+  listenCollection("stockMovementHistory", rows => { data.stockMovementHistory = rows; publish(); });
   unsubscribeData.push(onSnapshot(doc(db, "appSettings", "history"), snapshot => {
     data.settings = snapshot.exists() ? snapshot.data() : {};
     data.settingsReady = true;
