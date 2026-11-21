@@ -119,6 +119,7 @@ button:disabled {
 }
 
 .green { background: #15803d; }
+.yellow { background: #eab308; color: #172033; }
 .red { background: #dc2626; }
 .orange { background: #d97706; }
 
@@ -361,10 +362,18 @@ th { background: #f1f5f9; }
 }
 
 .cart-item-note {
-    flex: 1 0 100%;
-    width: 100%;
-    min-height: 58px;
+    flex: 0 1 220px;
+    width: 220px;
+    height: 42px;
+    min-height: 42px;
     resize: vertical;
+}
+
+@media (max-width: 700px) {
+    .cart-item-note {
+        flex: 1 1 100%;
+        width: 100%;
+    }
 }
 
 .empty {
@@ -1067,7 +1076,7 @@ th { background: #f1f5f9; }
         <div class="order-items-title">Order Items</div>
         <div id="cart">No products added yet.</div>
         <div class="order-submit-row">
-            <button class="green" onclick="submitOrder()">
+            <button id="submitOrderButton" class="yellow" onclick="submitOrder()" disabled>
                 Submit Order
             </button>
         </div>
@@ -1115,7 +1124,7 @@ th { background: #f1f5f9; }
         <h2>Order Management</h2>
         <p class="small">Orders and returns stay here until an Admin or Co-Admin clears them. Cleared records remain in Order History.</p>
     </div>
-    <button class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
+    <button id="clearManagementButton" class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
 </div>
 
 <div id="orderList"></div>
@@ -1237,6 +1246,10 @@ let orderHistory = [];
 // Legacy archived records remain readable for existing history.
 let archivedOrders = [];
 let cart = [];
+let orderSubmittedAndLocked = false;
+let orderSubmissionInProgress = false;
+let activeOrderSequence = 1;
+let orderSequenceReady = false;
 let returnCart = [];
 let activity = [];
 
@@ -1277,6 +1290,10 @@ function changeRole(assignedRole) {
 
     document.getElementById("adminProductForm").style.display =
         role === "admin" ? "block" : "none";
+    const clearManagementButton = document.getElementById("clearManagementButton");
+    if (clearManagementButton) {
+        clearManagementButton.style.display = role === "admin" ? "" : "none";
+    }
 
     document.querySelectorAll(".sidebar button").forEach(btn => {
 
@@ -1775,6 +1792,9 @@ function addToCart(id) {
         cart.push({...p,qty,note:""});
     }
 
+    if (orderSubmittedAndLocked) orderSubmittedAndLocked = false;
+    updateOrderSubmitButton();
+
     renderCart();
     searchProducts();
 }
@@ -1816,6 +1836,18 @@ function renderCart() {
 
         `).join("") || '<div class="small">No products added yet.</div>';
 
+    updateOrderSubmitButton();
+
+}
+
+function updateOrderSubmitButton() {
+    const button = document.getElementById("submitOrderButton");
+    if (!button) return;
+    const submitted = orderSubmittedAndLocked;
+    button.classList.toggle("green", submitted);
+    button.classList.toggle("yellow", !submitted);
+    button.textContent = submitted ? "Submitted ✓" : "Submit Order";
+    button.disabled = submitted || orderSubmissionInProgress || cart.length === 0 || !orderSequenceReady;
 }
 
 
@@ -2010,7 +2042,9 @@ function submitReturn() {
 // SUBMIT ORDER
 // ======================================
 
-function submitOrder() {
+async function submitOrder() {
+
+    if (orderSubmissionInProgress || orderSubmittedAndLocked || !orderSequenceReady) return;
 
     if (cart.length === 0) {
         alert("Please select products first.");
@@ -2040,8 +2074,8 @@ function submitOrder() {
 
     let order = {
 
-        id: "ORD-" +
-            String(orders.length + archivedOrders.length + orderHistory.length + 1).padStart(4,"0"),
+        id: "ORD-" + String(activeOrderSequence).padStart(4,"0"),
+        recordId: "ORDREC-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10),
 
         type,
         customer,
@@ -2063,8 +2097,21 @@ function submitOrder() {
 
     };
 
+    orderSubmissionInProgress = true;
+    updateOrderSubmitButton();
+    try {
+        if (!window.firebaseData?.setOrder) throw new Error("Firebase is not ready.");
+        await window.firebaseData.setOrder(order);
+    } catch (error) {
+        console.error("Could not submit order:", error);
+        orderSubmissionInProgress = false;
+        updateOrderSubmitButton();
+        alert("The order could not be submitted. Check your connection and try again.");
+        return;
+    }
+    orderSubmissionInProgress = false;
     orders.push(order);
-    persistFirebase(window.firebaseData?.setOrder(order));
+    orderSubmittedAndLocked = true;
 
     addActivity("Submitted " + order.id);
 
@@ -2075,6 +2122,7 @@ function submitOrder() {
     document.getElementById("orderSearch").value = "";
     document.getElementById("searchResults").innerHTML = "";
     renderCart();
+    updateOrderSubmitButton();
 
     updateDashboard();
 
@@ -2087,10 +2135,14 @@ function submitOrder() {
 // ORDER MANAGEMENT
 // ======================================
 
+function orderRecordKey(order) {
+    return order?.docId || order?.recordId || order?.id;
+}
+
 async function clearOrderManagement() {
 
-    if (role !== "admin" && role !== "coadmin") {
-        alert("Only Admin and Co-Admin can clear Order Management.");
+    if (role !== "admin") {
+        alert("Only Admin can clear Order Management.");
         return;
     }
 
@@ -2106,37 +2158,39 @@ async function clearOrderManagement() {
     );
     if (!confirmed) return;
 
-    if (!window.firebaseData?.moveOrdersToHistory) {
+    if (!window.firebaseData?.clearOrdersAndAdvanceSequence) {
         alert("Could not clear Order Management because Firebase is not ready.");
         return;
     }
 
-    const button = document.querySelector('button[onclick="clearOrderManagement()"]');
+    const button = document.getElementById("clearManagementButton");
     if (button) button.disabled = true;
     try {
-        const movedIds = await window.firebaseData.moveOrdersToHistory(recordsToClear);
-        const moved = recordsToClear.filter(order => movedIds.includes(order.id));
-        orderHistory = [...orderHistory.filter(order => !movedIds.includes(order.id)), ...moved];
-        orders = orders.filter(order => !movedIds.includes(order.id));
+        const result = await window.firebaseData.clearOrdersAndAdvanceSequence(recordsToClear);
+        const movedIds = result.movedIds;
+        const moved = recordsToClear.filter(order => movedIds.includes(orderRecordKey(order)));
+        orderHistory = [...orderHistory.filter(order => !movedIds.includes(orderRecordKey(order))), ...moved];
+        orders = orders.filter(order => !movedIds.includes(orderRecordKey(order)));
+        activeOrderSequence = result.nextSequence;
         renderManagement();
         updateDashboard();
         renderOrderHistory();
         renderStaffOrderHistory();
-        alert(`Order Management cleared. ${movedIds.length} record(s) remain in Order History.`);
+        alert(`Order Management cleared. The next orders will use ORD-${String(activeOrderSequence).padStart(4,"0")}. Cleared records remain in Order History.`);
     } catch (error) {
         console.error("Could not clear Order Management:", error);
         const movedIds = error.movedIds || [];
         if (movedIds.length) {
-            const moved = recordsToClear.filter(order => movedIds.includes(order.id));
-            orderHistory = [...orderHistory.filter(order => !movedIds.includes(order.id)), ...moved];
-            orders = orders.filter(order => !movedIds.includes(order.id));
+            const moved = recordsToClear.filter(order => movedIds.includes(orderRecordKey(order)));
+            orderHistory = [...orderHistory.filter(order => !movedIds.includes(orderRecordKey(order))), ...moved];
+            orders = orders.filter(order => !movedIds.includes(orderRecordKey(order)));
             renderManagement();
             updateDashboard();
             renderOrderHistory();
             renderStaffOrderHistory();
         }
         alert(movedIds.length
-            ? `Partially cleared ${movedIds.length} record(s). The remaining records are still in Order Management. Check Firestore rules and try again.`
+            ? `Cleared ${movedIds.length} record(s), but could not finish advancing the order number. History is preserved; check Firestore rules and try again.`
             : "Could not clear Order Management. Check Firestore rules and try again.");
     } finally {
         if (button) button.disabled = false;
@@ -2220,14 +2274,14 @@ function renderManagement() {
                                                     step="1"
                                                     value="${Number(item.qty) || 1}"
                                                     aria-label="Quantity for ${escapeAttr(item.name)} in order ${escapeAttr(order.id)}"
-                                                    onchange="updateOrderQuantity('${escapeAttr(order.id)}','${escapeAttr(item.id)}',this.value)">
+                                                    onchange="updateOrderQuantity('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}',this.value)">
                                             ` : item.qty}</td>
                                             <td>${item.note ? escapeHTML(item.note) : "—"}</td>
                                             <td>
                                                 <select
                                                     class="decision-select status-${statusClass}"
                                                     onchange="setDecision(
-                                                        '${escapeAttr(order.id)}',
+                                                        '${escapeAttr(orderRecordKey(order))}',
                                                         '${escapeAttr(item.id)}',
                                                         this.value
                                                     )"
@@ -2242,7 +2296,7 @@ function renderManagement() {
                                                 <td>
                                                     <button
                                                         class="admin-approve ${completed ? "is-approved" : ""}"
-                                                        onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(order.id)}','${escapeAttr(item.id)}')"
+                                                        onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}')"
                                                         ${item.status !== "Approved" || completed ? "disabled" : ""}>
                                                         ${completed ? "Completed" : isReturn ? "Stock IN" : "Stock OUT"}
                                                     </button>
@@ -2280,7 +2334,7 @@ function setDecision(orderId, productId, status) {
         return;
     }
 
-    const order = orders.find(o => o.id === orderId);
+    const order = orders.find(o => orderRecordKey(o) === orderId);
     if (!order) return;
 
     const item = order.items.find(i => i.id === productId);
@@ -2307,7 +2361,7 @@ function updateOrderQuantity(orderId, productId, value) {
         return;
     }
 
-    const order = orders.find(o => o.id === orderId);
+    const order = orders.find(o => orderRecordKey(o) === orderId);
     const item = order?.items.find(i => i.id === productId);
     if (!item || item.status === "Completed") return;
 
@@ -2343,7 +2397,7 @@ function stockOutItem(orderId, productId) {
         return;
     }
 
-    const order = orders.find(o => o.id === orderId);
+    const order = orders.find(o => orderRecordKey(o) === orderId);
     if (!order || order.kind === "return") return;
 
     const item = order.items.find(i => i.id === productId);
@@ -2381,7 +2435,7 @@ async function stockInReturn(orderId, productId) {
         alert("Only Admin can process Stock IN returns.");
         return;
     }
-    const order = orders.find(current => current.id === orderId);
+    const order = orders.find(current => orderRecordKey(current) === orderId);
     if (!order || order.kind !== "return") return;
 
     const item = order.items.find(current => current.id === productId);
@@ -2400,7 +2454,7 @@ async function stockInReturn(orderId, productId) {
 
     const localProduct = products.find(current => current.id === productId);
     if (localProduct) localProduct.stock = completed.product.stock;
-    const localOrder = orders.find(current => current.id === orderId);
+    const localOrder = orders.find(current => orderRecordKey(current) === orderId);
     if (localOrder) Object.assign(localOrder, completed.order);
     const completedItem = completed.order.items.find(current => current.id === productId);
 
@@ -2710,22 +2764,30 @@ function getAdminOrderHistoryItems() {
 
     const historyItems = [];
 
-    [...archivedOrders, ...orderHistory, ...orders].forEach(order => {
+    [
+        ...archivedOrders.map(order => ({...order, retainedInHistory:true})),
+        ...orderHistory.map(order => ({...order, retainedInHistory:true})),
+        ...orders
+    ].forEach(order => {
         order.items.forEach(item => {
-            if (item.status === "Completed") {
-                const completedAtValue =
+            if (item.status === "Completed" || order.retainedInHistory) {
+                const historyDateValue =
                     item.completedAtValue ||
                     Date.parse(item.completedAt || "") ||
+                    order.createdAtValue ||
                     Date.parse(order.date || "") ||
                     0;
 
-                // Manual clearing hides all earlier history entries.
-                if (completedAtValue <= adminHistoryClearedAt) return;
+                // The separate History clear control hides entries dated before its timestamp.
+                if (historyDateValue <= adminHistoryClearedAt) return;
 
                 historyItems.push({
                     orderId: order.id,
                     type: order.type,
-                    movement: order.kind === "return" ? "Stock IN" : "Stock OUT",
+                    movement: item.status === "Completed"
+                        ? (order.kind === "return" ? "Stock IN" : "Stock OUT")
+                        : (order.kind === "return" ? "Cleared Return" : "Cleared Order"),
+                    status: item.status,
                     createdBy: order.createdBy,
                     orderDate: order.date,
                     customer: order.customer,
@@ -2734,7 +2796,7 @@ function getAdminOrderHistoryItems() {
                     category: item.category,
                     qty: item.qty,
                     completedAt: item.completedAt || order.date,
-                    completedAtValue
+                    completedAtValue: historyDateValue
                 });
             }
         });
@@ -2767,7 +2829,7 @@ function renderOrderHistory() {
             <table>
                 <thead>
                     <tr>
-                        <th>Completed At</th>
+                        <th>Date</th>
                         <th>Movement</th>
                         <th>Order ID</th>
                         <th>Product ID</th>
@@ -2776,6 +2838,7 @@ function renderOrderHistory() {
                         <th>Quantity</th>
                         <th>Order Type</th>
                         <th>Customer</th>
+                        <th>Status</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2790,13 +2853,14 @@ function renderOrderHistory() {
                             <td>${item.qty}</td>
                             <td>${escapeHTML(item.type)}</td>
                             <td>${escapeHTML(item.customer || "—")}</td>
+                            <td>${escapeHTML(item.status)}</td>
                         </tr>
                     `).join("")}
                 </tbody>
             </table>
         </div>
 
-    ` : '<div class="empty">No completed stock movements in Order History.</div>';
+    ` : '<div class="empty">No order or stock movement history yet.</div>';
 
     const showingFrom = totalItems === 0 ? 0 : startIndex + 1;
     const showingTo = Math.min(startIndex + HISTORY_ITEMS_PER_PAGE, totalItems);
@@ -2825,7 +2889,7 @@ function downloadOrderHistoryExcel() {
     }
 
     const headers = [
-        "Completed At",
+        "Date",
         "Movement",
         "Order ID",
         "Product ID",
@@ -2833,7 +2897,8 @@ function downloadOrderHistoryExcel() {
         "Category",
         "Quantity",
         "Order Type",
-        "Customer"
+        "Customer",
+        "Status"
     ];
 
     const tableRows = historyItems.map(item => `
@@ -2847,6 +2912,7 @@ function downloadOrderHistoryExcel() {
             <td>${item.qty}</td>
             <td>${escapeHTML(item.type)}</td>
             <td>${escapeHTML(item.customer || "")}</td>
+            <td>${escapeHTML(item.status)}</td>
         </tr>
     `).join("");
 
@@ -2973,6 +3039,11 @@ window.stockAppApplyFirebaseData = function(data) {
     if (data.settings) {
         staffHistoryClearedAt = Number(data.settings.staffHistoryClearedAt || 0);
         adminHistoryClearedAt = Number(data.settings.adminHistoryClearedAt || 0);
+        activeOrderSequence = Math.max(1, Number(data.settings.activeOrderSequence || 1));
+    }
+    if (data.settingsReady) {
+        orderSequenceReady = true;
+        updateOrderSubmitButton();
     }
     if (document.getElementById("stockApp").style.display !== "none") {
         renderInventory();
@@ -3145,8 +3216,8 @@ window.firebaseData = {
     });
     return {added, skipped};
   }),
-  setOrder: order => setDoc(doc(db, "orders", order.id), order),
-  moveOrdersToHistory: async ordersToMove => {
+  setOrder: order => setDoc(doc(db, "orders", order.recordId || order.docId || order.id), order),
+  clearOrdersAndAdvanceSequence: async ordersToMove => {
     const movedIds = [];
     try {
       // Keep each batch small so Firestore rules can safely evaluate every write.
@@ -3154,23 +3225,26 @@ window.firebaseData = {
         const chunk = ordersToMove.slice(start, start + 20);
         const batch = writeBatch(db);
         chunk.forEach(order => {
-          batch.set(doc(db, "orderHistory", order.id), order);
-          batch.delete(doc(db, "orders", order.id));
+          const recordId = order.docId || order.recordId || order.id;
+          batch.set(doc(db, "orderHistory", recordId), order);
+          batch.delete(doc(db, "orders", recordId));
         });
         await batch.commit();
-        movedIds.push(...chunk.map(order => order.id));
+        movedIds.push(...chunk.map(order => order.docId || order.recordId || order.id));
       }
-      return movedIds;
+      const settingsRef = doc(db, "appSettings", "history");
+      const nextSequence = await runTransaction(db, async transaction => {
+        const snapshot = await transaction.get(settingsRef);
+        const settings = snapshot.exists() ? snapshot.data() : {};
+        const next = Math.max(1, Number(settings.activeOrderSequence || 1)) + 1;
+        transaction.set(settingsRef, {activeOrderSequence: next}, {merge: true});
+        return next;
+      });
+      return {movedIds, nextSequence};
     } catch (error) {
       error.movedIds = movedIds;
       throw error;
     }
-  },
-  archiveOrder: async order => {
-    const batch = writeBatch(db);
-    batch.set(doc(db, "archivedOrders", order.id), order);
-    batch.delete(doc(db, "orders", order.id));
-    await batch.commit();
   },
   setSettings: settings => setDoc(doc(db, "appSettings", "history"), settings, {merge: true})
 };
@@ -3183,7 +3257,12 @@ function clearListeners() {
 function listenCollection(name, callback) {
   unsubscribeData.push(onSnapshot(collection(db, name), snapshot => {
     if (name === "products") window.productDataReady = true;
-    callback(snapshot.docs.map(item => ({...item.data(), id: item.id})));
+    callback(snapshot.docs.map(item => {
+      const saved = item.data();
+      return ["orders", "orderHistory", "archivedOrders"].includes(name)
+        ? {...saved, id: saved.id || item.id, docId: item.id}
+        : {...saved, id: item.id};
+    }));
   }, error => {
     console.error(`Could not load ${name}:`, error);
     window.stockAppShowLogin("Unable to load stock data. Check the Firestore rules in your project.");
@@ -3192,8 +3271,10 @@ function listenCollection(name, callback) {
 
 function startWorkspace(user, role) {
   clearListeners();
+  orderSequenceReady = false;
+  updateOrderSubmitButton();
   window.stockAppSetRole(role, user.email);
-  const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], settings: {}};
+  const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], settings: {}, settingsReady: false};
   const publish = () => window.stockAppApplyFirebaseData(data);
   listenCollection("products", rows => { data.products = rows; publish(); });
   listenCollection("orders", rows => { data.orders = rows; publish(); });
@@ -3201,6 +3282,7 @@ function startWorkspace(user, role) {
   listenCollection("archivedOrders", rows => { data.archivedOrders = rows; publish(); });
   unsubscribeData.push(onSnapshot(doc(db, "appSettings", "history"), snapshot => {
     data.settings = snapshot.exists() ? snapshot.data() : {};
+    data.settingsReady = true;
     publish();
   }, error => {
     console.error("Could not load app settings:", error);
@@ -3213,6 +3295,8 @@ onAuthStateChanged(auth, async user => {
   window.firebaseAuthReady = true;
   if (!user) {
     clearListeners();
+    orderSequenceReady = false;
+    updateOrderSubmitButton();
     window.stockAppShowLogin(signOutMessage);
     signOutMessage = "";
     return;
