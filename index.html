@@ -37,6 +37,17 @@ header {
 
 header h2 { margin: 0; }
 
+.header-account {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+#userIdentity {
+    overflow-wrap: anywhere;
+}
+
 .layout {
     display: flex;
     min-height: calc(100vh - 65px);
@@ -211,6 +222,22 @@ th { background: #f1f5f9; }
     font-size: 12px;
 }
 
+.badge-order {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.badge-return {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.important-product-name,
+.important-stock-value {
+    font-weight: 700;
+    color: #0f172a;
+}
+
 .category-box {
     background: white;
     padding: 14px;
@@ -337,6 +364,18 @@ th { background: #f1f5f9; }
 
 .admin-approve.is-approved {
     background: #15803d;
+}
+
+.add-to-cart-button:disabled.added-locked {
+    background: #15803d;
+    color: #fff;
+    opacity: 1;
+    cursor: not-allowed;
+}
+
+.add-to-cart-button:disabled:not(.added-locked) {
+    background: #2563eb;
+    color: #fff;
 }
 
 .admin-approve:disabled {
@@ -515,6 +554,15 @@ th { background: #f1f5f9; }
         font-size: 19px;
     }
 
+    .header-account {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    #userIdentity {
+        font-size: 12px;
+    }
+
     .layout {
         flex-direction: column;
     }
@@ -524,18 +572,21 @@ th { background: #f1f5f9; }
         display: flex;
         overflow-x: auto;
         padding: 8px;
-        gap: 5px;
+        gap: 9px;
         position: sticky;
         top: 0;
         z-index: 10;
     }
 
     .sidebar button {
-        min-width: 115px;
+        flex: 0 0 auto;
+        min-width: max-content;
         width: auto;
         white-space: nowrap;
         margin: 0;
         font-size: 13px;
+        line-height: 1.25;
+        padding: 10px 13px;
     }
 
     main {
@@ -1304,6 +1355,7 @@ let products = [
     {id:"P012",name:"USB Adapter",category:"Accessories",stock:45}
 ];
 window.productDataReady = false;
+window.ordersDataReady = false;
 let productUpdateBusy = false;
 
 let orders = [];
@@ -1455,6 +1507,8 @@ function showPage(id, button) {
     if (id === "management") renderManagement();
     if (id === "history") renderOrderHistory();
     if (id === "staffhistory") renderStaffOrderHistory();
+    if (id === "order") searchProducts();
+    if (id === "returns") searchReturnProducts();
     if (id === "dashboard") updateDashboard();
 
 }
@@ -1500,9 +1554,9 @@ function renderInventory() {
 
         <tr>
             <td>${escapeHTML(p.id)}</td>
-            <td>${escapeHTML(p.name)}</td>
+            <td class="important-product-name">${escapeHTML(p.name)}</td>
             <td>${escapeHTML(p.category)}</td>
-            <td>${p.stock}</td>
+            <td class="important-stock-value">${p.stock}</td>
 
             ${role === "admin" ? `
 
@@ -1795,6 +1849,19 @@ function setReturnQuantityDraft(id, value) {
     returnQuantityDrafts.set(id, String(value));
 }
 
+
+function isProductLockedForManagement(productId) {
+    return orders.some(order =>
+        Array.isArray(order.items) && order.items.some(item => item.id === productId)
+    );
+}
+
+
+function isProductAlreadyInEitherCart(productId) {
+    return cart.some(item => item.id === productId) ||
+        returnCart.some(item => item.id === productId);
+}
+
 function searchProducts() {
 
     let query = document.getElementById("orderSearch")
@@ -1815,9 +1882,11 @@ function searchProducts() {
 
         results.map(p => {
             const cartItem = cart.find(item => item.id === p.id);
+            const locked = isProductLockedForManagement(p.id) || isProductAlreadyInEitherCart(p.id);
+            const waitingForOrders = !window.ordersDataReady;
             const quantityValue = orderQuantityDrafts.has(p.id)
                 ? orderQuantityDrafts.get(p.id)
-                : (cartItem?.qty || 1);
+                : (cartItem?.qty ?? 0);
             return `
 
         <div class="product-result">
@@ -1833,16 +1902,16 @@ function searchProducts() {
                 <input
                     id="orderQty-${escapeAttr(p.id)}"
                     type="number"
-                    min="1"
+                    min="0"
                     max="${p.stock}"
                     value="${escapeAttr(quantityValue)}"
                     oninput="setOrderQuantityDraft('${escapeAttr(p.id)}',this.value)"
                     aria-label="Order quantity for ${escapeAttr(p.name)}"
-                    ${p.stock <= 0 ? "disabled" : ""}>
-                <button
+                    ${locked || waitingForOrders || p.stock <= 0 ? "disabled" : ""}>
+                <button class="add-to-cart-button ${locked ? "added-locked" : ""}"
                     onclick="addToCart('${escapeAttr(p.id)}')"
-                    ${p.stock <= 0 ? "disabled" : ""}>
-                    Add
+                    ${locked || waitingForOrders || p.stock <= 0 ? "disabled" : ""}>
+                    ${locked ? "Added ✓" : waitingForOrders ? "Loading…" : "Add"}
                 </button>
             </div>
 
@@ -1860,9 +1929,12 @@ function searchProducts() {
 
 function addToCart(id) {
 
+    if (!window.ordersDataReady) return;
     let p = products.find(x => x.id === id);
 
     if (!p) return;
+
+    if (isProductLockedForManagement(id) || isProductAlreadyInEitherCart(id)) return;
 
     let quantityInput = document.getElementById("orderQty-" + id);
     let qty = Number(quantityInput ? quantityInput.value : (orderQuantityDrafts.get(id) || 1));
@@ -1997,9 +2069,11 @@ function searchReturnProducts() {
     );
     document.getElementById("returnSearchResults").innerHTML = results.map(product => {
         const cartItem = returnCart.find(item => item.id === product.id);
+        const locked = isProductLockedForManagement(product.id) || isProductAlreadyInEitherCart(product.id);
+        const waitingForOrders = !window.ordersDataReady;
         const quantityValue = returnQuantityDrafts.has(product.id)
             ? returnQuantityDrafts.get(product.id)
-            : (cartItem?.qty || 1);
+            : (cartItem?.qty ?? 0);
         return `
         <div class="product-result">
             <div class="product-result-main">
@@ -2007,11 +2081,15 @@ function searchReturnProducts() {
                 <div class="small">${escapeHTML(product.id)} · ${escapeHTML(product.category)} · Current stock: ${product.stock}</div>
             </div>
             <div class="product-order-controls">
-                <input id="returnQty-${escapeAttr(product.id)}" type="number" min="1"
+                <input id="returnQty-${escapeAttr(product.id)}" type="number" min="0"
                        value="${escapeAttr(quantityValue)}"
                        oninput="setReturnQuantityDraft('${escapeAttr(product.id)}',this.value)"
-                       aria-label="Return quantity for ${escapeAttr(product.name)}">
-                <button type="button" onclick="addToReturnCart('${escapeAttr(product.id)}')">Add</button>
+                       aria-label="Return quantity for ${escapeAttr(product.name)}"
+                       ${locked || waitingForOrders ? "disabled" : ""}>
+                <button class="add-to-cart-button ${locked ? "added-locked" : ""}" type="button"
+                        onclick="addToReturnCart('${escapeAttr(product.id)}')" ${locked || waitingForOrders ? "disabled" : ""}>
+                    ${locked ? "Added ✓" : waitingForOrders ? "Loading…" : "Add"}
+                </button>
             </div>
         </div>
     `;
@@ -2020,7 +2098,9 @@ function searchReturnProducts() {
 
 
 function addToReturnCart(id) {
+    if (!window.ordersDataReady) return;
     const product = products.find(item => item.id === id);
+    if (isProductLockedForManagement(id) || isProductAlreadyInEitherCart(id)) return;
     const quantityInput = document.getElementById("returnQty-" + id);
     const quantity = Number(quantityInput ? quantityInput.value : (returnQuantityDrafts.get(id) || 1));
     if (!product || !Number.isInteger(quantity) || quantity < 1) {
@@ -2132,7 +2212,7 @@ async function submitReturn() {
         type,
         customer,
         createdBy: role.toUpperCase(),
-        date: new Date().toLocaleString(),
+        date: formatDateTime12h(new Date()),
         createdAtValue: Date.now(),
         items: returnCart.map(item => ({
             id:item.id,
@@ -2218,7 +2298,7 @@ async function submitOrder() {
 
         createdBy: role.toUpperCase(),
 
-        date: new Date().toLocaleString(),
+        date: formatDateTime12h(new Date()),
         createdAtValue: Date.now(),
 
         items: cart.map(p => ({
@@ -2311,6 +2391,8 @@ async function clearOrderManagement() {
         orders = orders.filter(order => !movedIds.includes(orderRecordKey(order)));
         activeOrderSequence = result.nextSequence;
         renderManagement();
+        searchProducts();
+        searchReturnProducts();
         updateDashboard();
         renderOrderHistory();
         renderStaffOrderHistory();
@@ -2323,6 +2405,8 @@ async function clearOrderManagement() {
             orderHistory = [...orderHistory.filter(order => !movedIds.includes(orderRecordKey(order))), ...moved];
             orders = orders.filter(order => !movedIds.includes(orderRecordKey(order)));
             renderManagement();
+            searchProducts();
+            searchReturnProducts();
             updateDashboard();
             renderOrderHistory();
             renderStaffOrderHistory();
@@ -2349,35 +2433,57 @@ function renderManagement() {
     }
 
     // Collect every order line, then group all lines by category.
+    const orderTime = order =>
+        Number(order.createdAtValue || 0) || Date.parse(order.date || "") || 0;
     const newestFirstOrders = [...orders].sort((a, b) =>
-        Number(b.createdAtValue || 0) - Number(a.createdAtValue || 0)
+        orderTime(b) - orderTime(a) ||
+        String(orderRecordKey(a) || "").localeCompare(String(orderRecordKey(b) || ""))
     );
-    const categories = [...new Set(
-        newestFirstOrders.flatMap(order => order.items.map(item => item.category))
-    )];
 
-    container.innerHTML = categories.map(category => {
+    // Build exactly one category box per normalized category, shared by
+    // order and return records. The newest active category appears first.
+    const categoryGroups = new Map();
+    newestFirstOrders.forEach(order => {
+        order.items.forEach(item => {
+            const label = String(item.category || "Uncategorized").trim() || "Uncategorized";
+            const key = label.toLocaleLowerCase();
+            if (!categoryGroups.has(key)) {
+                categoryGroups.set(key, {key, label, newestAt:orderTime(order)});
+            }
+        });
+    });
+    const categories = [...categoryGroups.values()].sort((a, b) =>
+        b.newestAt - a.newestAt || a.label.localeCompare(b.label)
+    );
 
+    container.innerHTML = categories.map(categoryGroup => {
+
+        const category = categoryGroup.label;
         const categoryOrders = newestFirstOrders.filter(order =>
-            order.items.some(item => item.category === category)
+            order.items.some(item =>
+                (String(item.category || "Uncategorized").trim() || "Uncategorized")
+                    .toLocaleLowerCase() === categoryGroup.key
+            )
         );
 
         const orderSections = categoryOrders.map(order => {
 
             const items = order.items.filter(item =>
-                item.category === category
+                (String(item.category || "Uncategorized").trim() || "Uncategorized")
+                    .toLocaleLowerCase() === categoryGroup.key
             );
+            const isReturn = order.kind === "return";
 
             return `
                 <div class="order-group">
                     <h4>
                         ${escapeHTML(order.id)}
-                        <span class="badge">${escapeHTML(order.type)}</span>
+                        <span class="badge ${isReturn ? "badge-return" : "badge-order"}">${escapeHTML(order.type)}</span>
                     </h4>
 
                     <p class="small">
                         Submitted by: ${escapeHTML(order.createdBy)}
-                        · ${escapeHTML(order.date)}
+                        · ${escapeHTML(formatDateTime12h(order.createdAtValue || order.date))}
                         ${order.customer ? " · Customer: " + escapeHTML(order.customer) : ""}
                     </p>
 
@@ -2400,13 +2506,12 @@ function renderManagement() {
                                     const available = product ? product.stock : 0;
                                     const statusClass = item.status.toLowerCase();
                                     const completed = item.status === "Completed";
-                                    const isReturn = order.kind === "return";
 
                                     return `
                                         <tr>
                                             <td>${escapeHTML(item.id)}</td>
-                                            <td>${escapeHTML(item.name)}</td>
-                                            <td>${available}</td>
+                                            <td class="important-product-name">${escapeHTML(item.name)}</td>
+                                            <td class="important-stock-value">${available}</td>
                                             <td>${canEditQuantities && !completed ? `
                                                 <input
                                                     class="management-qty-input"
@@ -2529,7 +2634,7 @@ function updateOrderQuantity(orderId, productId, value) {
         by: role === "coadmin" ? "Co-Admin" : "Admin",
         from: previousQuantity,
         to: quantity,
-        at: new Date().toLocaleString(),
+        at: formatDateTime12h(new Date()),
         atValue: Date.now()
     });
     persistFirebase(window.firebaseData?.setOrder(order));
@@ -2871,7 +2976,7 @@ function addActivity(message) {
 
         message,
 
-        time:new Date().toLocaleString(),
+        time:formatDateTime12h(new Date()),
 
         user:role.toUpperCase()
 
@@ -3074,7 +3179,7 @@ function renderOrderHistory() {
                 <tbody>
                     ${visibleItems.map(item => `
                         <tr>
-                            <td>${escapeHTML(item.completedAt)}</td>
+                            <td>${escapeHTML(formatDateTime12h(item.completedAtValue || item.completedAt))}</td>
                             <td>${escapeHTML(item.movement)}</td>
                             <td>${escapeHTML(item.orderId)}</td>
                             <td>${escapeHTML(item.productId)}</td>
@@ -3133,7 +3238,7 @@ function downloadOrderHistoryExcel() {
 
     const tableRows = historyItems.map(item => `
         <tr>
-            <td>${escapeHTML(item.completedAt)}</td>
+            <td>${escapeHTML(formatDateTime12h(item.completedAtValue || item.completedAt))}</td>
             <td>${escapeHTML(item.movement)}</td>
             <td>${escapeHTML(item.orderId)}</td>
             <td>${escapeHTML(item.productId)}</td>
@@ -3250,6 +3355,22 @@ function escapeHTML(value) {
 }
 
 
+function formatDateTime12h(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value || "");
+    return date.toLocaleString("en-IN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true
+    });
+}
+window.formatDateTime12h = formatDateTime12h;
+
+
 function escapeAttr(value) {
 
     return String(value)
@@ -3282,6 +3403,8 @@ window.stockAppApplyFirebaseData = function(data) {
         renderManagement();
         renderOrderHistory();
         renderStaffOrderHistory();
+        searchProducts();
+        searchReturnProducts();
         updateDashboard();
     }
 };
@@ -3397,13 +3520,107 @@ const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 let unsubscribeData = [];
 let signOutMessage = "";
+const IDLE_LOGOUT_MS = 60 * 60 * 1000;
+let idleLogoutTimer = null;
+let idleTrackedUid = "";
+let lastUserActivityAt = Date.now();
+
+function idleActivityStorageKey(uid) {
+  return `stock-management-last-active:${uid}`;
+}
+
+function readSavedActivity(uid) {
+  try {
+    const value = Number(localStorage.getItem(idleActivityStorageKey(uid)) || 0);
+    return Number.isFinite(value) ? value : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function saveActivity(uid, value) {
+  try { localStorage.setItem(idleActivityStorageKey(uid), String(value)); } catch (_) {}
+}
+
+function clearSavedActivity(uid) {
+  try { localStorage.removeItem(idleActivityStorageKey(uid)); } catch (_) {}
+}
+
+function stopIdleLogoutTimer() {
+  window.clearTimeout(idleLogoutTimer);
+  idleLogoutTimer = null;
+}
+
+function expireIdleSession() {
+  stopIdleLogoutTimer();
+  if (!auth.currentUser || !idleTrackedUid) return;
+  const saved = readSavedActivity(idleTrackedUid);
+  lastUserActivityAt = Math.max(lastUserActivityAt, saved);
+  const remaining = IDLE_LOGOUT_MS - (Date.now() - lastUserActivityAt);
+  if (remaining > 0) {
+    idleLogoutTimer = window.setTimeout(expireIdleSession, remaining);
+    return;
+  }
+  clearSavedActivity(idleTrackedUid);
+  signOutMessage = "You were signed out after one hour without activity. Please sign in again.";
+  signOut(auth).catch(error => console.error("Automatic sign-out failed:", error));
+}
+
+function startIdleLogoutTimer(user) {
+  stopIdleLogoutTimer();
+  idleTrackedUid = user.uid;
+  const saved = readSavedActivity(user.uid);
+  lastUserActivityAt = saved || Date.now();
+  if (Date.now() - lastUserActivityAt >= IDLE_LOGOUT_MS) {
+    clearSavedActivity(user.uid);
+    signOutMessage = "You were signed out after one hour without activity. Please sign in again.";
+    signOut(auth).catch(error => console.error("Automatic sign-out failed:", error));
+    return false;
+  }
+  saveActivity(user.uid, lastUserActivityAt);
+  idleLogoutTimer = window.setTimeout(expireIdleSession, IDLE_LOGOUT_MS - (Date.now() - lastUserActivityAt));
+  return true;
+}
+
+function recordUserActivity() {
+  const user = auth.currentUser;
+  if (!user) return;
+  lastUserActivityAt = Date.now();
+  idleTrackedUid = user.uid;
+  saveActivity(user.uid, lastUserActivityAt);
+  stopIdleLogoutTimer();
+  idleLogoutTimer = window.setTimeout(expireIdleSession, IDLE_LOGOUT_MS);
+}
+
+["pointerdown", "keydown", "touchstart", "scroll"].forEach(eventName => {
+  document.addEventListener(eventName, recordUserActivity, {passive:true});
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && auth.currentUser) expireIdleSession();
+});
+
+window.addEventListener("storage", event => {
+  if (auth.currentUser && event.key === idleActivityStorageKey(auth.currentUser.uid)) {
+    const sharedActivity = Number(event.newValue || 0);
+    if (sharedActivity > lastUserActivityAt) {
+      lastUserActivityAt = sharedActivity;
+      stopIdleLogoutTimer();
+      idleLogoutTimer = window.setTimeout(expireIdleSession, Math.max(0, IDLE_LOGOUT_MS - (Date.now() - lastUserActivityAt)));
+    }
+  }
+});
 
 function makeMovementEventId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 window.firebaseSignIn = (email, password) => signInWithEmailAndPassword(auth, email, password);
-window.firebaseSignOut = () => signOut(auth);
+window.firebaseSignOut = async () => {
+  stopIdleLogoutTimer();
+  if (auth.currentUser) clearSavedActivity(auth.currentUser.uid);
+  return signOut(auth);
+};
 window.firebaseData = {
   setProduct: product => setDoc(doc(db, "products", product.id), product),
   completeStockOut: (orderId, productId) => runTransaction(db, async transaction => {
@@ -3433,7 +3650,7 @@ window.firebaseData = {
       throw new Error("The requested quantity is invalid or exceeds available stock.");
     }
 
-    const completedAt = new Date().toLocaleString();
+    const completedAt = window.formatDateTime12h(new Date());
     const completedAtValue = Date.now();
     const eventId = makeMovementEventId("OUT");
     const historyEvent = {
@@ -3489,7 +3706,7 @@ window.firebaseData = {
     if (!Number.isSafeInteger(quantity) || quantity < 1) {
       throw new Error("The return quantity is invalid.");
     }
-    const completedAt = new Date().toLocaleString();
+    const completedAt = window.formatDateTime12h(new Date());
     const completedAtValue = Date.now();
     const eventId = makeMovementEventId("IN");
     const historyEvent = {
@@ -3592,6 +3809,7 @@ function clearListeners() {
 function listenCollection(name, callback) {
   unsubscribeData.push(onSnapshot(collection(db, name), snapshot => {
     if (name === "products") window.productDataReady = true;
+    if (name === "orders") window.ordersDataReady = true;
     callback(snapshot.docs.map(item => {
       const saved = item.data();
       return ["orders", "orderHistory", "archivedOrders", "stockMovementHistory"].includes(name)
@@ -3606,6 +3824,7 @@ function listenCollection(name, callback) {
 
 function startWorkspace(user, role) {
   clearListeners();
+  window.ordersDataReady = false;
   orderSequenceReady = false;
   updateOrderSubmitButton();
   updateReturnSubmitButton();
@@ -3631,6 +3850,10 @@ onAuthStateChanged(auth, async user => {
   window.clearTimeout(window.firebaseStartupTimer);
   window.firebaseAuthReady = true;
   if (!user) {
+    stopIdleLogoutTimer();
+    if (idleTrackedUid) clearSavedActivity(idleTrackedUid);
+    idleTrackedUid = "";
+    window.ordersDataReady = false;
     clearListeners();
     orderSequenceReady = false;
     updateOrderSubmitButton();
@@ -3639,6 +3862,7 @@ onAuthStateChanged(auth, async user => {
     signOutMessage = "";
     return;
   }
+  if (!startIdleLogoutTimer(user)) return;
   try {
     let profileTimeout;
     const profileTimeoutPromise = new Promise((_, reject) => {
