@@ -1354,6 +1354,7 @@ const PRODUCT_CATALOG_URL = "https://capitalhardwaresandmachineries.github.io/ST
 window.productDataReady = false;
 window.ordersDataReady = false;
 let productUpdateBusy = false;
+let managementStockLoadInProgress = false;
 
 function mergeCatalogWithStock() {
     const stockById = new Map(products.map(product => [String(product.id), product]));
@@ -1381,7 +1382,7 @@ function updateCachedStock(rows) {
 async function loadStockForIds(ids, force = false) {
     const uniqueIds = [...new Set(ids.map(id => String(id)))];
     const now = Date.now();
-    const idsToLoad = uniqueIds.filter(id => force || !stockCacheTimes.has(id) || now - stockCacheTimes.get(id) > 15000);
+    const idsToLoad = uniqueIds.filter(id => force || !stockCacheTimes.has(id) || now - stockCacheTimes.get(id) > 60000);
     if (!idsToLoad.length) return;
     const pending = idsToLoad.filter(id => !stockFetchPromises.has(id));
     const promises = idsToLoad.map(id => stockFetchPromises.get(id)).filter(Boolean);
@@ -1405,6 +1406,14 @@ let orderHistory = [];
 let stockMovementHistory = [];
 // Legacy archived records remain readable for existing history.
 let archivedOrders = [];
+let staffOrderHistory = [];
+let staffHistoryReady = false;
+let staffHistoryLoading = null;
+let staffHistoryUnsubscribe = null;
+let legacyStaffHistoryMigrated = false;
+let historyUnsubscribers = [];
+let historyDataReady = false;
+let historyInitialSnapshots = new Set();
 let cart = [];
 let orderQuantityDrafts = new Map();
 let orderSubmittedAndLocked = false;
@@ -1543,13 +1552,22 @@ function showPage(id, button) {
 
     if (button) button.classList.add("active");
 
-    if (id === "inventory") renderInventory(true);
+    if (id === "inventory") renderInventory();
     if (id === "management") renderManagement();
     if (id === "history") renderOrderHistory();
     if (id === "staffhistory") renderStaffOrderHistory();
     if (id === "order") searchProducts();
     if (id === "returns") searchReturnProducts();
     if (id === "dashboard") updateDashboard();
+
+    if (id === "dashboard" || id === "history") {
+        window.setTimeout(startHistoryListeners, 0);
+    }
+    if (id !== "staffhistory" && staffHistoryUnsubscribe) {
+        staffHistoryUnsubscribe();
+        staffHistoryUnsubscribe = null;
+        staffHistoryReady = false;
+    }
 
 }
 
@@ -1635,8 +1653,14 @@ async function renderInventory(forceStockRefresh = false) {
     document.getElementById("inventoryNextPage").disabled = inventoryPage >= totalPages;
 
     if (!window.productDataReady || !visibleProducts.length) return;
+    const now = Date.now();
+    const visibleIds = visibleProducts.map(product => String(product.id));
+    const stockNeedsRefresh = forceStockRefresh || visibleIds.some(id =>
+        !stockCacheTimes.has(id) || now - stockCacheTimes.get(id) > 60000
+    );
+    if (!stockNeedsRefresh) return;
     try {
-        await loadStockForIds(visibleProducts.map(product => product.id), forceStockRefresh);
+        await loadStockForIds(visibleIds, forceStockRefresh);
         if (loadToken === inventoryLoadToken) renderInventory(false);
     } catch (error) {
         console.error("Could not load inventory page stock:", error);
@@ -2003,7 +2027,11 @@ function searchProducts() {
         `;
         }).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
 
-    if (results.length && window.productDataReady) {
+    const stockNow = Date.now();
+    const stockNeedsRefresh = results.some(product =>
+        !stockCacheTimes.has(String(product.id)) || stockNow - stockCacheTimes.get(String(product.id)) > 60000
+    );
+    if (results.length && window.productDataReady && stockNeedsRefresh) {
         clearTimeout(orderSearchTimer);
         orderSearchTimer = setTimeout(async () => {
             try {
@@ -2208,7 +2236,11 @@ function searchReturnProducts() {
         </div>
     `;
     }).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
-    if (results.length && window.productDataReady) {
+    const stockNow = Date.now();
+    const stockNeedsRefresh = results.some(product =>
+        !stockCacheTimes.has(String(product.id)) || stockNow - stockCacheTimes.get(String(product.id)) > 60000
+    );
+    if (results.length && window.productDataReady && stockNeedsRefresh) {
         clearTimeout(returnSearchTimer);
         returnSearchTimer = setTimeout(async () => {
             try {
@@ -2571,13 +2603,21 @@ function renderManagement() {
         return;
     }
 
-    if (document.getElementById("management")?.classList.contains("active")) {
+    if (document.getElementById("management")?.classList.contains("active") && !managementStockLoadInProgress) {
         const activeProductIds = [...new Set(orders.flatMap(order =>
             (Array.isArray(order.items) ? order.items : []).map(item => String(item.id))
         ))];
-        loadStockForIds(activeProductIds).then(() => {
-            if (document.getElementById("management")?.classList.contains("active")) renderManagement();
-        }).catch(error => console.error("Could not refresh stock for active orders:", error));
+        const now = Date.now();
+        const needsRefresh = activeProductIds.some(id =>
+            !stockCacheTimes.has(id) || now - stockCacheTimes.get(id) > 60000
+        );
+        if (needsRefresh) {
+            managementStockLoadInProgress = true;
+            loadStockForIds(activeProductIds).then(() => {
+                if (document.getElementById("management")?.classList.contains("active")) renderManagement();
+            }).catch(error => console.error("Could not refresh stock for active orders:", error))
+              .finally(() => { managementStockLoadInProgress = false; });
+        }
     }
 
     // Collect every order line, then group all lines by category.
@@ -3150,26 +3190,71 @@ function addActivity(message) {
 }
 
 
-function renderStaffOrderHistory() {
+async function ensureStaffHistoryLoaded() {
+    if (staffHistoryLoading) return staffHistoryLoading;
+    staffHistoryLoading = (async () => {
+        if (!legacyStaffHistoryMigrated) {
+            const settings = await window.firebaseData.getSettings();
+            if (!settings.staffHistoryStorageMigrated) {
+                const legacy = await window.firebaseData.getLegacyStaffOrders();
+                const previousClearAt = Number(settings.staffHistoryClearedAt || 0);
+                const migrated = legacy.map(order => ({
+                    ...order,
+                    items:(order.items || []).filter(item => {
+                        const status = String(item.status || "").toLowerCase();
+                        if (!["completed", "denied"].includes(status)) return true;
+                        return Number(item.completedAtValue || order.createdAtValue || 0) > previousClearAt;
+                    })
+                })).filter(order => order.items.length > 0);
+                await window.firebaseData.seedStaffHistory(migrated);
+                await window.firebaseData.setSettings({staffHistoryStorageMigrated:true});
+            }
+            legacyStaffHistoryMigrated = true;
+        }
+        staffOrderHistory = await window.firebaseData.getStaffHistory();
+        staffHistoryReady = true;
+        if (!staffHistoryUnsubscribe && document.getElementById("staffhistory")?.classList.contains("active")) {
+            staffHistoryUnsubscribe = window.firebaseData.listenStaffHistory(rows => {
+                staffOrderHistory = rows;
+                staffHistoryReady = true;
+                if (document.getElementById("staffhistory")?.classList.contains("active")) renderStaffOrderHistory();
+            });
+        }
+        if (document.getElementById("staffhistory")?.classList.contains("active")) renderStaffOrderHistory();
+    })().finally(() => { staffHistoryLoading = null; });
+    return staffHistoryLoading;
+}
 
-    // Staff history is independent of Admin/Co-Admin history and stays until
-    // Staff uses its own Clear History button.
-    // The same pending record can briefly appear in the live list and history
-    // snapshots. Merge by the underlying Firestore record key; later sources
-    // (live orders) replace older copies so each item is shown once.
+function renderStaffOrderHistory() {
+    if (!staffHistoryReady) {
+        document.getElementById("staffOrderHistoryList").innerHTML = '<div class="small">Loading staff history…</div>';
+        ensureStaffHistoryLoaded().catch(error => {
+            console.error("Could not load staff history:", error);
+            document.getElementById("staffOrderHistoryList").innerHTML = '<div class="small">Could not load staff history. Check your connection and Firestore rules.</div>';
+        });
+        return;
+    }
+
     const staffOrdersByRecord = new Map();
-    [...archivedOrders, ...orderHistory, ...orders].forEach(order => {
+    staffOrderHistory.forEach(order => {
         const recordKey = order?.recordId || order?.docId || order?.id;
         if (recordKey) staffOrdersByRecord.set(recordKey, order);
     });
-
+    // Active pending or approved items remain visible until they are completed
+    // or denied. Cleared terminal items cannot reappear from Order Management.
+    orders.filter(order => order.createdBy === "STAFF").forEach(order => {
+        const key = order?.recordId || order?.docId || order?.id;
+        if (!key) return;
+        const activeItems = (order.items || []).filter(item => !["completed", "denied"].includes(String(item.status || "").toLowerCase()));
+        if (!activeItems.length) return;
+        const prior = staffOrdersByRecord.get(key) || order;
+        const mergedItems = new Map((prior.items || []).map(item => [item.id, item]));
+        activeItems.forEach(item => mergedItems.set(item.id, item));
+        staffOrdersByRecord.set(key, {...prior, items:[...mergedItems.values()]});
+    });
     const staffOrders = [...staffOrdersByRecord.values()]
-        .filter(order =>
-            order.createdBy === "STAFF" &&
-            order.createdAtValue &&
-            order.createdAtValue > staffHistoryClearedAt
-        )
-        .sort((a, b) => b.createdAtValue - a.createdAtValue);
+        .filter(order => order.createdBy === "STAFF")
+        .sort((a, b) => Number(b.createdAtValue || 0) - Number(a.createdAtValue || 0));
 
     const rows = [];
 
@@ -3239,22 +3324,29 @@ function renderStaffOrderHistory() {
 }
 
 
-function clearStaffOrderHistory() {
-
-    // Clear only the Staff history display. Orders remain available
-    // to Admin and Co-Admin for approval, processing, and reporting.
-    staffHistoryClearedAt = Date.now();
-    persistFirebase(window.firebaseData?.setSettings({staffHistoryClearedAt}));
-    renderStaffOrderHistory();
-
+async function clearStaffOrderHistory() {
+    if (role !== "staff") return alert("Only Staff can clear Staff Order History.");
+    if (!confirm("Permanently delete completed and denied staff history? Pending and approved items will stay visible and remain in Order Management.")) return;
+    const button = document.querySelector('#staffhistory button[onclick="clearStaffOrderHistory()"]');
+    if (button) button.disabled = true;
+    try {
+        await ensureStaffHistoryLoaded();
+        const result = await window.firebaseData.clearStaffHistory();
+        staffOrderHistory = result.remaining;
+        renderStaffOrderHistory();
+        alert(`Deleted ${result.deleted} completed or denied item record(s). Pending and approved items remain.`);
+    } catch (error) {
+        console.error("Could not permanently clear staff history:", error);
+        alert("Could not clear staff history. Check Firestore rules and try again.");
+    } finally {
+        if (button) button.disabled = false;
+    }
 }
 
 
 function getAdminOrderHistoryItems() {
 
-    const historyItems = stockMovementHistory
-        .filter(event => Number(event.completedAtValue || 0) > adminHistoryClearedAt)
-        .map(event => ({...event}));
+    const historyItems = stockMovementHistory.map(event => ({...event}));
     const recordedEventIds = new Set(stockMovementHistory.map(event => event.id));
     const recordedOrderItems = new Set(stockMovementHistory.map(event =>
         `${event.orderRecordId}:${event.productId}`
@@ -3264,8 +3356,7 @@ function getAdminOrderHistoryItems() {
     // stock movement records were added, plus orders cleared before processing.
     [
         ...archivedOrders.map(order => ({...order, retainedInHistory:true})),
-        ...orderHistory.map(order => ({...order, retainedInHistory:true})),
-        ...orders
+        ...orderHistory.map(order => ({...order, retainedInHistory:true}))
     ].forEach(order => {
         order.items.forEach(item => {
             const hasImmutableMovement = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
@@ -3280,8 +3371,6 @@ function getAdminOrderHistoryItems() {
                 order.createdAtValue ||
                 Date.parse(order.date || "") ||
                 0;
-            if (historyDateValue <= adminHistoryClearedAt) return;
-
             historyItems.push({
                 orderId: order.id,
                 type: order.type,
@@ -3309,6 +3398,11 @@ function getAdminOrderHistoryItems() {
 
 
 function renderOrderHistory() {
+
+    if (!historyDataReady) {
+        document.getElementById("activityList").innerHTML = '<div class="empty">Loading order history…</div>';
+        return;
+    }
 
     const historyItems = getAdminOrderHistoryItems();
 
@@ -3378,6 +3472,11 @@ function downloadOrderHistoryExcel() {
 
     if (role !== "admin") {
         alert("Only Admin can download Order History.");
+        return;
+    }
+
+    if (!historyDataReady) {
+        alert("Order History is still loading. Wait a moment, then download it.");
         return;
     }
 
@@ -3463,32 +3562,36 @@ function downloadOrderHistoryExcel() {
 }
 
 
-function clearOrderHistory() {
+async function clearOrderHistory() {
 
     if (role !== "admin") {
         alert("Only Admin can clear Order History.");
         return;
     }
 
-    const historyItems = getAdminOrderHistoryItems();
-
-    if (historyItems.length === 0) {
-        alert("Order History is already empty.");
-        return;
-    }
-
     if (!confirm(
-        "Clear Order History for both Admin and Co-Admin? Staff Order History will stay unchanged. This does not change stock or remove orders from Order Management."
+        "Permanently delete Admin and Co-Admin Order History from Firebase? This cannot be undone. Staff history, current Order Management records, and stock quantities will stay unchanged. Download an Excel copy first if you need a backup."
     )) {
         return;
     }
-
-    // Manual clear only: no automatic expiry is applied to Admin Order History.
-    // Keep the underlying orders intact; hide completed history entries up to now.
-    adminHistoryClearedAt = Date.now();
-    persistFirebase(window.firebaseData?.setSettings({adminHistoryClearedAt}));
-    historyPage = 1;
-    renderOrderHistory();
+    const button = document.getElementById("clearOrderHistoryButton");
+    if (button) button.disabled = true;
+    try {
+        await ensureStaffHistoryLoaded();
+        const result = await window.firebaseData.clearOrderHistory();
+        orderHistory = [];
+        archivedOrders = [];
+        stockMovementHistory = [];
+        historyPage = 1;
+        renderOrderHistory();
+        updateDashboard();
+        alert(`Permanently deleted ${result.deleted} history record(s).`);
+    } catch (error) {
+        console.error("Could not permanently clear Order History:", error);
+        alert("Could not permanently clear Order History. Check Firestore rules and try again.");
+    } finally {
+        if (button) button.disabled = false;
+    }
 
 }
 
@@ -3556,6 +3659,7 @@ window.stockAppApplyFirebaseData = function(data) {
         staffHistoryClearedAt = Number(data.settings.staffHistoryClearedAt || 0);
         adminHistoryClearedAt = Number(data.settings.adminHistoryClearedAt || 0);
         activeOrderSequence = Math.max(1, Number(data.settings.activeOrderSequence || 1));
+        legacyStaffHistoryMigrated = Boolean(data.settings.staffHistoryStorageMigrated);
     }
     if (data.settingsReady) {
         orderSequenceReady = true;
@@ -3877,6 +3981,7 @@ window.firebaseData = {
     item.historyEventId = eventId;
     transaction.set(productRef, productData);
     transaction.set(orderRef, orderData);
+    if (orderData.createdBy === "STAFF") transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
     return {product:productData, order:orderData, historyEvent};
   }),
@@ -3933,6 +4038,7 @@ window.firebaseData = {
     returnItem.historyEventId = eventId;
     transaction.set(productRef, productData);
     transaction.set(orderRef, orderData);
+    if (orderData.createdBy === "STAFF") transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
     return {product:productData, order:orderData, historyEvent};
   }),
@@ -3968,7 +4074,78 @@ window.firebaseData = {
       throw error;
     }
   },
-  setOrder: order => setDoc(doc(db, "orders", order.recordId || order.docId || order.id), order),
+  setOrder: async order => {
+    const recordId = order.recordId || order.docId || order.id;
+    const batch = writeBatch(db);
+    batch.set(doc(db, "orders", recordId), order);
+    if (order.createdBy === "STAFF") batch.set(doc(db, "staffOrderHistory", recordId), order);
+    await batch.commit();
+  },
+  getSettings: async () => {
+    const snapshot = await getDoc(doc(db, "appSettings", "history"));
+    return snapshot.exists() ? snapshot.data() : {};
+  },
+  getLegacyStaffOrders: async () => {
+    const snapshots = await Promise.all([
+      getDocs(collection(db, "orders")),
+      getDocs(collection(db, "orderHistory")),
+      getDocs(collection(db, "archivedOrders"))
+    ]);
+    const rows = new Map();
+    snapshots.slice().reverse().forEach(snapshot => snapshot.docs.forEach(item => {
+      const order = {...item.data(), docId:item.id};
+      if (order.createdBy === "STAFF") rows.set(item.id, order);
+    }));
+    return [...rows.values()];
+  },
+  seedStaffHistory: async rows => {
+    for (let offset = 0; offset < rows.length; offset += 400) {
+      const batch = writeBatch(db);
+      rows.slice(offset, offset + 400).forEach(order => {
+        const id = order.recordId || order.docId || order.id;
+        batch.set(doc(db, "staffOrderHistory", id), order, {merge:true});
+      });
+      await batch.commit();
+    }
+  },
+  getStaffHistory: async () => {
+    const snapshot = await getDocs(collection(db, "staffOrderHistory"));
+    return snapshot.docs.map(item => ({...item.data(), docId:item.id}));
+  },
+  listenStaffHistory: callback => onSnapshot(collection(db, "staffOrderHistory"), snapshot => {
+    callback(snapshot.docs.map(item => ({...item.data(), docId:item.id})));
+  }),
+  clearStaffHistory: async () => {
+    const snapshot = await getDocs(collection(db, "staffOrderHistory"));
+    let deleted = 0;
+    for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
+      const batch = writeBatch(db);
+      snapshot.docs.slice(offset, offset + 400).forEach(item => {
+        const order = item.data();
+        const retainedItems = (order.items || []).filter(entry => !["completed", "denied"].includes(String(entry.status || "").toLowerCase()));
+        deleted += (order.items || []).length - retainedItems.length;
+        if (retainedItems.length) batch.update(item.ref, {items:retainedItems});
+        else batch.delete(item.ref);
+      });
+      await batch.commit();
+    }
+    const remaining = await getDocs(collection(db, "staffOrderHistory"));
+    return {deleted, remaining:remaining.docs.map(item => ({...item.data(), docId:item.id}))};
+  },
+  clearOrderHistory: async () => {
+    let deleted = 0;
+    for (const name of ["stockMovementHistory", "orderHistory", "archivedOrders"]) {
+      const snapshot = await getDocs(collection(db, name));
+      for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
+        const batch = writeBatch(db);
+        const chunk = snapshot.docs.slice(offset, offset + 400);
+        chunk.forEach(item => batch.delete(item.ref));
+        await batch.commit();
+        deleted += chunk.length;
+      }
+    }
+    return {deleted};
+  },
   clearOrdersAndAdvanceSequence: async ordersToMove => {
     const movedIds = [];
     try {
@@ -4004,6 +4181,16 @@ window.firebaseData = {
 function clearListeners() {
   unsubscribeData.forEach(stop => stop());
   unsubscribeData = [];
+  stopHistoryListeners();
+  if (staffHistoryUnsubscribe) staffHistoryUnsubscribe();
+  staffHistoryUnsubscribe = null;
+  staffHistoryReady = false;
+  staffHistoryLoading = null;
+  staffOrderHistory = [];
+  orderHistory = [];
+  archivedOrders = [];
+  stockMovementHistory = [];
+  legacyStaffHistoryMigrated = false;
 }
 
 function listenCollection(name, callback) {
@@ -4022,6 +4209,37 @@ function listenCollection(name, callback) {
   }));
 }
 
+function stopHistoryListeners() {
+  historyUnsubscribers.forEach(stop => stop());
+  historyUnsubscribers = [];
+  historyInitialSnapshots = new Set();
+  historyDataReady = false;
+}
+
+function startHistoryListeners() {
+  if (historyUnsubscribers.length || !window.firebaseData) return;
+  const targets = ["orderHistory", "archivedOrders", "stockMovementHistory"];
+  targets.forEach(name => {
+    historyUnsubscribers.push(onSnapshot(collection(db, name), snapshot => {
+      historyInitialSnapshots.add(name);
+      const rows = snapshot.docs.map(item => ({...item.data(), id:item.data().id || item.id, docId:item.id}));
+      if (name === "orderHistory") orderHistory = rows;
+      if (name === "archivedOrders") archivedOrders = rows;
+      if (name === "stockMovementHistory") stockMovementHistory = rows;
+      historyDataReady = targets.every(target => historyInitialSnapshots.has(target));
+      if (historyDataReady) {
+        if (document.getElementById("history")?.classList.contains("active")) renderOrderHistory();
+        if (document.getElementById("dashboard")?.classList.contains("active")) updateDashboard();
+      }
+    }, error => {
+      console.error(`Could not load ${name}:`, error);
+      if (document.getElementById("history")?.classList.contains("active")) {
+        document.getElementById("activityList").innerHTML = '<div class="empty">Could not load history. Check Firestore rules and try again.</div>';
+      }
+    }));
+  });
+}
+
 async function startWorkspace(user, role) {
   clearListeners();
   window.productDataReady = false;
@@ -4029,12 +4247,9 @@ async function startWorkspace(user, role) {
   orderSequenceReady = false;
   updateOrderSubmitButton();
   updateReturnSubmitButton();
-  const data = {orders: [], orderHistory: [], archivedOrders: [], stockMovementHistory: [], settings: {}, settingsReady: false};
+  const data = {orders: [], settings: {}, settingsReady: false};
   const publish = () => window.stockAppApplyFirebaseData(data);
   listenCollection("orders", rows => { data.orders = rows; publish(); });
-  listenCollection("orderHistory", rows => { data.orderHistory = rows; publish(); });
-  listenCollection("archivedOrders", rows => { data.archivedOrders = rows; publish(); });
-  listenCollection("stockMovementHistory", rows => { data.stockMovementHistory = rows; publish(); });
   unsubscribeData.push(onSnapshot(doc(db, "appSettings", "history"), snapshot => {
     data.settings = snapshot.exists() ? snapshot.data() : {};
     data.settingsReady = true;
