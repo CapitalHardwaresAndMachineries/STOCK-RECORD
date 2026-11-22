@@ -1243,6 +1243,7 @@ th { background: #f1f5f9; }
         <p class="small">Orders and returns stay here until an Admin or Co-Admin clears them. Cleared records remain in Order History.</p>
     </div>
     <button id="clearManagementButton" class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
+    <button id="resetTestDataButton" class="red" onclick="resetAllTestData()" style="display:none">Reset All Test Data</button>
 </div>
 
 <div id="orderList"></div>
@@ -1471,6 +1472,8 @@ function changeRole(assignedRole) {
     if (clearManagementButton) {
         clearManagementButton.style.display = role === "admin" ? "" : "none";
     }
+    const resetTestDataButton = document.getElementById("resetTestDataButton");
+    if (resetTestDataButton) resetTestDataButton.style.display = role === "admin" ? "" : "none";
     ["downloadOrderHistoryButton", "clearOrderHistoryButton"].forEach(id => {
         const button = document.getElementById(id);
         if (button) button.style.display = role === "admin" ? "" : "none";
@@ -2409,7 +2412,7 @@ async function submitReturn() {
         return;
     }
     returnSubmissionInProgress = false;
-    orders.push(order);
+    orders = upsertOrder(orders, order);
     returnSubmittedAndLocked = true;
     addActivity("Submitted return " + order.id);
     returnCart = [];
@@ -2497,7 +2500,7 @@ async function submitOrder() {
         return;
     }
     orderSubmissionInProgress = false;
-    orders.push(order);
+    orders = upsertOrder(orders, order);
     orderSubmittedAndLocked = true;
 
     addActivity("Submitted " + order.id);
@@ -2526,6 +2529,55 @@ async function submitOrder() {
 
 function orderRecordKey(order) {
     return order?.docId || order?.recordId || order?.id;
+}
+
+function dedupeOrders(records) {
+    const unique = new Map();
+    (Array.isArray(records) ? records : []).forEach(order => {
+        const key = String(orderRecordKey(order) || "");
+        if (!key) return;
+        const current = unique.get(key);
+        unique.set(key, current ? {...current, ...order, docId:order.docId || current.docId} : order);
+    });
+    return [...unique.values()];
+}
+
+function upsertOrder(records, order) {
+    const key = String(orderRecordKey(order) || "");
+    return dedupeOrders([...records.filter(item => String(orderRecordKey(item) || "") !== key), order]);
+}
+
+async function resetAllTestData() {
+    if (role !== "admin") return alert("Only Admin can reset test data.");
+    const confirmed = confirm(
+        "Permanently delete ALL Firebase test data: current orders, returns, admin/co-admin history, staff history, stock movement history, and all Firebase stock records? Product names and categories from the GitHub catalogue will remain. Reupload your stock workbook after the reset. This cannot be undone."
+    );
+    if (!confirmed) return;
+    const button = document.getElementById("resetTestDataButton");
+    if (button) button.disabled = true;
+    try {
+        const result = await window.firebaseData.resetAllTestData();
+        orders = [];
+        orderHistory = [];
+        archivedOrders = [];
+        stockMovementHistory = [];
+        staffOrderHistory = [];
+        activeOrderSequence = 1;
+        historyPage = 1;
+        products.forEach(product => { product.stock = 0; product.stockReady = true; });
+        stockCacheTimes.clear();
+        renderManagement();
+        renderOrderHistory();
+        renderStaffOrderHistory();
+        renderInventory();
+        updateDashboard();
+        alert(`Reset complete. Deleted ${result.deleted} records. The next order will be ORD-0001. Upload the stock workbook to restore current quantities.`);
+    } catch (error) {
+        console.error("Could not reset test data:", error);
+        alert("Could not reset all test data. Check Firebase rules/connection. Some collections may already have been cleared; run Reset All Test Data again to finish.");
+    } finally {
+        if (button) button.disabled = false;
+    }
 }
 
 async function clearOrderManagement() {
@@ -2596,6 +2648,7 @@ function renderManagement() {
 
     let container = document.getElementById("orderList");
     const canEditQuantities = role === "admin" || role === "coadmin";
+    orders = dedupeOrders(orders);
 
     if (orders.length === 0) {
         container.innerHTML =
@@ -2761,7 +2814,7 @@ function renderManagement() {
 // ORDER DECISION AND ITEM STOCK OUT
 // ======================================
 
-function setDecision(orderId, productId, status) {
+async function setDecision(orderId, productId, status) {
 
     if (role !== "admin" && role !== "coadmin") {
         alert("Access denied.");
@@ -2774,8 +2827,20 @@ function setDecision(orderId, productId, status) {
     const item = order.items.find(i => i.id === productId);
     if (!item || item.status === "Completed") return;
 
+    const previousStatus = item.status;
     item.status = status;
-    persistFirebase(window.firebaseData?.setOrder(order));
+    const decisionAtValue = Date.now();
+    try {
+        await window.firebaseData.setOrder(order);
+        const decisionEvent = await window.firebaseData.recordOrderDecision(order, item, status, decisionAtValue);
+        orderHistory = [decisionEvent, ...orderHistory.filter(event => event.id !== decisionEvent.id)];
+        historyPage = 1;
+        renderOrderHistory();
+    } catch (error) {
+        item.status = previousStatus;
+        console.error("Could not save order decision:", error);
+        alert("Could not save the decision to Firebase. Check connection and rules, then try again.");
+    }
 
     addActivity(
         "Updated " + productId +
@@ -3010,7 +3075,7 @@ function getPopularItemResults(category = "All Categories") {
     });
 
     const allOrders = new Map();
-    [...archivedOrders, ...orderHistory, ...orders].forEach(order => {
+    [...archivedOrders, ...orderHistory, ...orders].filter(order => Array.isArray(order.items)).forEach(order => {
         allOrders.set(orderRecordKey(order), order);
     });
     allOrders.forEach(order => {
@@ -3346,7 +3411,8 @@ async function clearStaffOrderHistory() {
 
 function getAdminOrderHistoryItems() {
 
-    const historyItems = stockMovementHistory.map(event => ({...event}));
+    const decisionEvents = orderHistory.filter(event => event.recordType === "decision");
+    const historyItems = [...stockMovementHistory, ...decisionEvents].map(event => ({...event}));
     const recordedEventIds = new Set(stockMovementHistory.map(event => event.id));
     const recordedOrderItems = new Set(stockMovementHistory.map(event =>
         `${event.orderRecordId}:${event.productId}`
@@ -3357,7 +3423,7 @@ function getAdminOrderHistoryItems() {
     [
         ...archivedOrders.map(order => ({...order, retainedInHistory:true})),
         ...orderHistory.map(order => ({...order, retainedInHistory:true}))
-    ].forEach(order => {
+    ].filter(order => Array.isArray(order.items)).forEach(order => {
         order.items.forEach(item => {
             const hasImmutableMovement = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
                 recordedOrderItems.has(`${orderRecordKey(order)}:${item.id}`);
@@ -3651,7 +3717,7 @@ function escapeAttr(value) {
 
 // Firebase authentication and database state bridge.
 window.stockAppApplyFirebaseData = function(data) {
-    if (Array.isArray(data.orders)) orders = data.orders;
+    if (Array.isArray(data.orders)) orders = dedupeOrders(data.orders);
     if (Array.isArray(data.orderHistory)) orderHistory = data.orderHistory;
     if (Array.isArray(data.archivedOrders)) archivedOrders = data.archivedOrders;
     if (Array.isArray(data.stockMovementHistory)) stockMovementHistory = data.stockMovementHistory;
@@ -4081,6 +4147,48 @@ window.firebaseData = {
     if (order.createdBy === "STAFF") batch.set(doc(db, "staffOrderHistory", recordId), order);
     await batch.commit();
   },
+  recordOrderDecision: async (order, item, status, decisionAtValue) => {
+    const recordId = order.recordId || order.docId || order.id;
+    const eventId = `DEC-${recordId}-${item.id}-${decisionAtValue}-${Math.random().toString(36).slice(2, 7)}`;
+    const event = {
+      id:eventId,
+      recordType:"decision",
+      orderId:order.id || recordId,
+      orderRecordId:recordId,
+      movement:`Decision: ${status}`,
+      status,
+      type:order.type || "",
+      customer:order.customer || "",
+      createdBy:order.createdBy || "",
+      productId:item.id,
+      productName:item.name || "",
+      category:item.category || "",
+      qty:Number(item.qty || 0),
+      completedAt:window.formatDateTime12h(new Date(decisionAtValue)),
+      completedAtValue:decisionAtValue
+    };
+    await setDoc(doc(db, "orderHistory", eventId), event);
+    return event;
+  },
+  resetAllTestData: async () => {
+    let deleted = 0;
+    for (const name of ["orders", "orderHistory", "archivedOrders", "stockMovementHistory", "staffOrderHistory", "products"]) {
+      const snapshot = await getDocs(collection(db, name));
+      for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
+        const batch = writeBatch(db);
+        const chunk = snapshot.docs.slice(offset, offset + 400);
+        chunk.forEach(item => batch.delete(item.ref));
+        await batch.commit();
+        deleted += chunk.length;
+      }
+    }
+    await setDoc(doc(db, "appSettings", "history"), {
+      activeOrderSequence:1,
+      adminHistoryClearedAt:Date.now(),
+      staffHistoryClearedAt:Date.now()
+    }, {merge:true});
+    return {deleted};
+  },
   getSettings: async () => {
     const snapshot = await getDoc(doc(db, "appSettings", "history"));
     return snapshot.exists() ? snapshot.data() : {};
@@ -4094,7 +4202,7 @@ window.firebaseData = {
     const rows = new Map();
     snapshots.slice().reverse().forEach(snapshot => snapshot.docs.forEach(item => {
       const order = {...item.data(), docId:item.id};
-      if (order.createdBy === "STAFF") rows.set(item.id, order);
+      if (order.createdBy === "STAFF" && Array.isArray(order.items)) rows.set(item.id, order);
     }));
     return [...rows.values()];
   },
