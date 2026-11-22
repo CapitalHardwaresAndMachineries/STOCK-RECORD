@@ -1612,8 +1612,8 @@ async function updateInventoryFromFile() {
         const incomingProducts = await readInventoryWorkbook(file);
         const currentCount = products.length;
         const confirmUpdate = confirm(
-            `Replace the current inventory (${currentCount} products) with ${incomingProducts.length} products from this workbook?\n\n` +
-            `Matching Product IDs will be updated. Product IDs missing from the workbook will be removed.`
+            `Delete all ${currentCount} current product records and import ${incomingProducts.length} rows from this workbook?\n\n` +
+            `Order history and stock movement history will remain unchanged. If the upload is interrupted, select this workbook and press Update again to finish.`
         );
         if (!confirmUpdate) {
             status.textContent = "Update cancelled. Current inventory was not changed.";
@@ -1635,7 +1635,7 @@ async function updateInventoryFromFile() {
         document.getElementById("productImportFile").value = "";
         renderInventory();
         updateDashboard();
-        status.textContent = `Inventory updated: ${result.updated} rows saved; ${result.removed} old products removed.`;
+        status.textContent = `Inventory replaced: ${result.updated} new rows imported; ${result.removed} old product records deleted. Order history was unchanged.`;
     } catch (error) {
         console.error("Inventory replacement stopped:", error);
         status.textContent = error.message || "Could not update inventory. Check Firebase access and try again.";
@@ -3354,35 +3354,34 @@ window.firebaseData = {
     return {product:productData, order:orderData, historyEvent};
   }),
   replaceProductInventory: async (productsToSave, existingIds, onProgress) => {
-    const newIds = new Set(productsToSave.map(product => product.id));
-    const removedIds = existingIds.filter(id => !newIds.has(id));
+    const removedIds = [...new Set(existingIds)];
     const chunkSize = 300;
     let saved = 0;
     let removed = 0;
 
     try {
-      // Save every incoming row first, so old-only rows are not deleted
-      // before the replacement data has been uploaded successfully.
-      for (let offset = 0; offset < productsToSave.length; offset += chunkSize) {
-        const chunk = productsToSave.slice(offset, offset + chunkSize);
-        const batch = writeBatch(db);
-        chunk.forEach(product => batch.set(doc(db, "products", product.id), product));
-        await batch.commit();
-        saved += chunk.length;
-        if (onProgress) onProgress(`Saving workbook rows… ${saved} of ${productsToSave.length}`);
-      }
-
+      // Empty the products collection first so every workbook import starts
+      // from a clean inventory. History collections are not touched here.
       for (let offset = 0; offset < removedIds.length; offset += chunkSize) {
         const chunk = removedIds.slice(offset, offset + chunkSize);
         const batch = writeBatch(db);
         chunk.forEach(id => batch.delete(doc(db, "products", id)));
         await batch.commit();
         removed += chunk.length;
-        if (onProgress) onProgress(`Removing products not in the workbook… ${removed} of ${removedIds.length}`);
+        if (onProgress) onProgress(`Deleting current product records… ${removed} of ${removedIds.length}`);
+      }
+
+      for (let offset = 0; offset < productsToSave.length; offset += chunkSize) {
+        const chunk = productsToSave.slice(offset, offset + chunkSize);
+        const batch = writeBatch(db);
+        chunk.forEach(product => batch.set(doc(db, "products", product.id), product));
+        await batch.commit();
+        saved += chunk.length;
+        if (onProgress) onProgress(`Importing workbook rows… ${saved} of ${productsToSave.length}`);
       }
       return {updated:saved, removed};
     } catch (error) {
-      error.message = `Inventory replacement stopped after saving ${saved} workbook rows and removing ${removed} old products. Select the same workbook and press Update again to finish. ${error.message || "Check Firebase access."}`;
+      error.message = `Inventory replacement stopped after deleting ${removed} old product records and importing ${saved} new rows. The inventory may be incomplete. Select the same workbook and press Update again to finish. ${error.message || "Check Firebase access."}`;
       throw error;
     }
   },
