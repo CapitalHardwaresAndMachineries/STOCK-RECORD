@@ -1417,6 +1417,7 @@ let historyDataReady = false;
 let historyInitialSnapshots = new Set();
 let historyLoadError = "";
 let historyFallbackTimer = null;
+let historyRefreshPromise = null;
 let popularityTotals = {};
 let popularityTotalsReady = false;
 let popularityMigrationPromise = null;
@@ -1562,7 +1563,10 @@ function showPage(id, button) {
 
     if (id === "inventory") renderInventory();
     if (id === "management") renderManagement();
-    if (id === "history") renderOrderHistory();
+    if (id === "history") {
+        renderOrderHistory();
+        refreshAdminOrderHistory();
+    }
     if (id === "staffhistory") renderStaffOrderHistory();
     if (id === "order") searchProducts();
     if (id === "returns") searchReturnProducts();
@@ -2686,24 +2690,25 @@ function renderManagement() {
         }
     }
 
-    // Collect every order line, then group all lines by category.
+    // Collect all order lines first, then make one table for each normalized
+    // category so interleaved submissions cannot split category sections.
     const orderTime = order =>
         Number(order.createdAtValue || 0) || Date.parse(order.date || "") || 0;
     const newestFirstOrders = [...orders].sort((a, b) =>
         orderTime(b) - orderTime(a) ||
         String(orderRecordKey(a) || "").localeCompare(String(orderRecordKey(b) || ""))
     );
-
-    // Build exactly one category box per normalized category, shared by
-    // order and return records. The newest active category appears first.
     const categoryGroups = new Map();
     newestFirstOrders.forEach(order => {
-        order.items.forEach(item => {
+        (Array.isArray(order.items) ? order.items : []).forEach(item => {
             const label = String(item.category || "Uncategorized").trim() || "Uncategorized";
-            const key = label.toLocaleLowerCase();
+            const key = label.normalize("NFKC").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
             if (!categoryGroups.has(key)) {
-                categoryGroups.set(key, {key, label, newestAt:orderTime(order)});
+                categoryGroups.set(key, {key, label, newestAt:orderTime(order), rows:[]});
             }
+            const group = categoryGroups.get(key);
+            group.newestAt = Math.max(group.newestAt, orderTime(order));
+            group.rows.push({order, item});
         });
     });
     const categories = [...categoryGroups.values()].sort((a, b) =>
@@ -2711,112 +2716,43 @@ function renderManagement() {
     );
 
     container.innerHTML = categories.map(categoryGroup => {
-
-        const category = categoryGroup.label;
-        const categoryOrders = newestFirstOrders.filter(order =>
-            order.items.some(item =>
-                (String(item.category || "Uncategorized").trim() || "Uncategorized")
-                    .toLocaleLowerCase() === categoryGroup.key
-            )
-        );
-
-        const orderSections = categoryOrders.map(order => {
-
-            const items = order.items.filter(item =>
-                (String(item.category || "Uncategorized").trim() || "Uncategorized")
-                    .toLocaleLowerCase() === categoryGroup.key
-            );
+        const rows = categoryGroup.rows.map(({order, item}) => {
             const isReturn = order.kind === "return";
-
+            const product = products.find(p => p.id === item.id);
+            const available = product ? product.stock : 0;
+            const statusClass = String(item.status || "Pending").toLowerCase();
+            const completed = item.status === "Completed";
             return `
-                <div class="order-group">
-                    <h4>
-                        ${escapeHTML(order.id)}
-                        <span class="badge ${isReturn ? "badge-return" : "badge-order"}">${escapeHTML(order.type)}</span>
-                    </h4>
-
-                    <p class="small">
-                        Submitted by: ${escapeHTML(order.createdBy)}
-                        · ${escapeHTML(formatDateTime12h(order.createdAtValue || order.date))}
-                        ${order.customer ? " · Customer: " + escapeHTML(order.customer) : ""}
-                    </p>
-
-                    <div class="table-wrap">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Product ID</th>
-                                    <th>Product</th>
-                                    <th>${order.kind === "return" ? "Current Stock" : "Available"}</th>
-                                    <th>Requested</th>
-                                    <th>Item Note</th>
-                                    <th>Decision</th>
-                                    ${role === "admin" ? `<th>${order.kind === "return" ? "Stock IN" : "Stock OUT"}</th>` : ""}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${items.map(item => {
-                                    const product = products.find(p => p.id === item.id);
-                                    const available = product ? product.stock : 0;
-                                    const statusClass = item.status.toLowerCase();
-                                    const completed = item.status === "Completed";
-
-                                    return `
-                                        <tr>
-                                            <td>${escapeHTML(item.id)}</td>
-                                            <td class="important-product-name">${escapeHTML(item.name)}</td>
-                                            <td class="important-stock-value">${available}</td>
-                                            <td>${canEditQuantities && !completed ? `
-                                                <input
-                                                    class="management-qty-input"
-                                                    type="number"
-                                                    min="1"
-                                                    step="1"
-                                                    value="${Number(item.qty) || 1}"
-                                                    aria-label="Quantity for ${escapeAttr(item.name)} in order ${escapeAttr(order.id)}"
-                                                    onchange="updateOrderQuantity('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}',this.value)">
-                                            ` : item.qty}</td>
-                                            <td>${item.note ? escapeHTML(item.note) : "—"}</td>
-                                            <td>
-                                                <select
-                                                    class="decision-select status-${statusClass}"
-                                                    onchange="setDecision(
-                                                        '${escapeAttr(orderRecordKey(order))}',
-                                                        '${escapeAttr(item.id)}',
-                                                        this.value
-                                                    )"
-                                                    ${completed ? "disabled" : ""}>
-                                                    <option value="Pending" ${item.status === "Pending" ? "selected" : ""}>Pending</option>
-                                                    <option value="Approved" ${item.status === "Approved" ? "selected" : ""}>Approved</option>
-                                                    <option value="Denied" ${item.status === "Denied" ? "selected" : ""}>Denied</option>
-                                                    ${completed ? '<option value="Completed" selected>Completed</option>' : ""}
-                                                </select>
-                                            </td>
-                                            ${role === "admin" ? `
-                                                <td>
-                                                    <button
-                                                        class="admin-approve ${completed ? "is-approved" : ""}"
-                                                        onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}')"
-                                                        ${item.status !== "Approved" || completed ? "disabled" : ""}>
-                                                        ${completed ? "Completed" : isReturn ? "Stock IN" : "Stock OUT"}
-                                                    </button>
-                                                </td>
-                                            ` : ""}
-                                        </tr>
-                                    `;
-                                }).join("")}
-                            </tbody>
-                        </table>
-                    </div>
-
-                </div>
+                <tr>
+                    <td>${escapeHTML(order.id)}</td>
+                    <td><span class="badge ${isReturn ? "badge-return" : "badge-order"}">${escapeHTML(order.type)}</span></td>
+                    <td>${escapeHTML(order.createdBy)} · ${escapeHTML(formatDateTime12h(order.createdAtValue || order.date))}${order.customer ? `<br>${escapeHTML(order.customer)}` : ""}</td>
+                    <td>${escapeHTML(item.id)}</td>
+                    <td class="important-product-name">${escapeHTML(item.name)}</td>
+                    <td class="important-stock-value">${available}</td>
+                    <td>${canEditQuantities && !completed ? `<input class="management-qty-input" type="number" min="1" step="1" value="${Number(item.qty) || 1}" aria-label="Quantity for ${escapeAttr(item.name)} in order ${escapeAttr(order.id)}" onchange="updateOrderQuantity('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}',this.value)">` : item.qty}</td>
+                    <td>${item.note ? escapeHTML(item.note) : "—"}</td>
+                    <td><select class="decision-select status-${statusClass}" onchange="setDecision('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}',this.value)" ${completed ? "disabled" : ""}>
+                        <option value="Pending" ${item.status === "Pending" ? "selected" : ""}>Pending</option>
+                        <option value="Approved" ${item.status === "Approved" ? "selected" : ""}>Approved</option>
+                        <option value="Denied" ${item.status === "Denied" ? "selected" : ""}>Denied</option>
+                        ${completed ? '<option value="Completed" selected>Completed</option>' : ""}
+                    </select></td>
+                    ${role === "admin" ? `<td><button class="admin-approve ${completed ? "is-approved" : ""}" onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}')" ${item.status !== "Approved" || completed ? "disabled" : ""}>${completed ? "Completed" : isReturn ? "Stock IN" : "Stock OUT"}</button></td>` : ""}
+                </tr>
             `;
         }).join("");
-
         return `
             <div class="category-box">
-                <h3>Category: ${escapeHTML(category)}</h3>
-                ${orderSections}
+                <h3>Category: ${escapeHTML(categoryGroup.label)}</h3>
+                <div class="table-wrap"><table>
+                    <thead><tr>
+                        <th>Order ID</th><th>Type</th><th>Submitted By / Date</th><th>Product ID</th><th>Product</th>
+                        <th>Current Stock</th>
+                        <th>Requested</th><th>Item Note</th><th>Decision</th>${role === "admin" ? "<th>Stock Action</th>" : ""}
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table></div>
             </div>
         `;
     }).join("");
@@ -3295,11 +3231,37 @@ function addActivity(message) {
 }
 
 
+function mergeStaffHistoryRecords(...recordGroups) {
+    const merged = new Map();
+    const isTerminal = status => ["completed", "denied"].includes(String(status || "").toLowerCase());
+    recordGroups.flat().forEach(order => {
+        if (!order || !Array.isArray(order.items)) return;
+        const key = String(order.recordId || order.docId || order.id || "");
+        if (!key) return;
+        const prior = merged.get(key);
+        const items = new Map((prior?.items || []).map(item => [String(item.id), item]));
+        order.items.forEach(item => {
+            const itemKey = String(item.id || "");
+            if (!itemKey) return;
+            const existing = items.get(itemKey);
+            if (existing && isTerminal(existing.status) && !isTerminal(item.status)) return;
+            if (existing && isTerminal(existing.status) && isTerminal(item.status)) {
+                const oldAt = Number(existing.completedAtValue || 0);
+                const newAt = Number(item.completedAtValue || 0);
+                if (oldAt > newAt) return;
+            }
+            items.set(itemKey, item);
+        });
+        merged.set(key, {...prior, ...order, recordId:key, items:[...items.values()]});
+    });
+    return [...merged.values()];
+}
+
 async function ensureStaffHistoryLoaded() {
     if (staffHistoryLoading) return staffHistoryLoading;
     staffHistoryLoading = (async () => {
+        const settings = await window.firebaseData.getSettings();
         if (!legacyStaffHistoryMigrated) {
-            const settings = await window.firebaseData.getSettings();
             if (!settings.staffHistoryStorageMigrated) {
                 const legacy = await window.firebaseData.getLegacyStaffOrders();
                 const previousClearAt = Number(settings.staffHistoryClearedAt || 0);
@@ -3315,6 +3277,24 @@ async function ensureStaffHistoryLoaded() {
                 await window.firebaseData.setSettings({staffHistoryStorageMigrated:true});
             }
             legacyStaffHistoryMigrated = true;
+        }
+        const existingHistory = await window.firebaseData.getStaffHistory();
+        const meta = existingHistory.find(order => order.docId === "_staffHistoryMeta") || {};
+        if (!meta.historyBackfillV2) {
+            const legacy = await window.firebaseData.getLegacyStaffOrders();
+            const previousClearAt = Number(meta.historyClearedAt || settings.staffHistoryClearedAt || 0);
+            const eligibleLegacy = legacy.map(order => ({
+                ...order,
+                items:(order.items || []).filter(item => {
+                    const status = String(item.status || "").toLowerCase();
+                    if (!["completed", "denied"].includes(status)) return true;
+                    const itemAt = Number(item.completedAtValue || order.createdAtValue || 0);
+                    return !previousClearAt || itemAt > previousClearAt;
+                })
+            })).filter(order => order.items.length > 0);
+            const cleanExisting = existingHistory.filter(order => Array.isArray(order.items));
+            await window.firebaseData.seedStaffHistory(mergeStaffHistoryRecords(cleanExisting, eligibleLegacy));
+            await window.firebaseData.saveStaffHistoryMeta({historyBackfillV2:true, historyClearedAt:previousClearAt});
         }
         staffOrderHistory = await window.firebaseData.getStaffHistory();
         staffHistoryReady = true;
@@ -3341,7 +3321,7 @@ function renderStaffOrderHistory() {
     }
 
     const staffOrdersByRecord = new Map();
-    staffOrderHistory.forEach(order => {
+    staffOrderHistory.filter(order => Array.isArray(order.items)).forEach(order => {
         const recordKey = order?.recordId || order?.docId || order?.id;
         if (recordKey) staffOrdersByRecord.set(recordKey, order);
     });
@@ -3576,6 +3556,35 @@ function renderOrderHistory() {
     document.getElementById("historyPreviousPage").disabled = historyPage <= 1;
     document.getElementById("historyNextPage").disabled = historyPage >= totalPages;
 
+}
+
+async function refreshAdminOrderHistory() {
+    if (historyRefreshPromise) return historyRefreshPromise;
+    if (historyDataReady && !historyLoadError) return;
+    historyRefreshPromise = (async () => {
+        try {
+            const rows = await window.firebaseData.getOrderHistoryOnce();
+            orderHistory = rows.orderHistory;
+            archivedOrders = rows.archivedOrders;
+            stockMovementHistory = rows.stockMovementHistory;
+            historyInitialSnapshots = new Set(["orderHistory", "archivedOrders", "stockMovementHistory"]);
+            historyDataReady = true;
+            historyLoadError = "";
+            if (historyFallbackTimer) clearTimeout(historyFallbackTimer);
+            historyFallbackTimer = null;
+            initializePopularityTotalsFromHistory();
+            renderOrderHistory();
+            updateDashboard();
+        } catch (error) {
+            console.error("Could not refresh Admin/Co-Admin order history:", error);
+            if (!historyDataReady) {
+                historyLoadError = error.code || error.message || "read failed";
+                historyDataReady = true;
+                renderOrderHistory();
+            }
+        }
+    })().finally(() => { historyRefreshPromise = null; });
+    return historyRefreshPromise;
 }
 
 
@@ -4285,9 +4294,23 @@ window.firebaseData = {
       getDocs(collection(db, "archivedOrders"))
     ]);
     const rows = new Map();
+    const terminal = status => ["completed", "denied"].includes(String(status || "").toLowerCase());
     snapshots.slice().reverse().forEach(snapshot => snapshot.docs.forEach(item => {
       const order = {...item.data(), docId:item.id};
-      if (order.createdBy === "STAFF" && Array.isArray(order.items)) rows.set(item.id, order);
+      if (order.createdBy !== "STAFF" || !Array.isArray(order.items)) return;
+      const key = String(order.recordId || order.docId || order.id);
+      const prior = rows.get(key);
+      const items = new Map((prior?.items || []).map(entry => [String(entry.id), entry]));
+      order.items.forEach(entry => {
+        const itemKey = String(entry.id || "");
+        if (!itemKey) return;
+        const existing = items.get(itemKey);
+        if (existing && terminal(existing.status) && !terminal(entry.status)) return;
+        if (existing && terminal(existing.status) && terminal(entry.status) &&
+            Number(existing.completedAtValue || 0) > Number(entry.completedAtValue || 0)) return;
+        items.set(itemKey, entry);
+      });
+      rows.set(key, {...prior, ...order, recordId:key, items:[...items.values()]});
     }));
     return [...rows.values()];
   },
@@ -4305,15 +4328,21 @@ window.firebaseData = {
     const snapshot = await getDocs(collection(db, "staffOrderHistory"));
     return snapshot.docs.map(item => ({...item.data(), docId:item.id}));
   },
+  saveStaffHistoryMeta: metadata => setDoc(doc(db, "staffOrderHistory", "_staffHistoryMeta"), {
+    createdBy:"STAFF",
+    ...metadata
+  }, {merge:true}),
   listenStaffHistory: callback => onSnapshot(collection(db, "staffOrderHistory"), snapshot => {
     callback(snapshot.docs.map(item => ({...item.data(), docId:item.id})));
   }),
   clearStaffHistory: async () => {
     const snapshot = await getDocs(collection(db, "staffOrderHistory"));
     let deleted = 0;
+    const historyClearedAt = Date.now();
     for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
       const batch = writeBatch(db);
       snapshot.docs.slice(offset, offset + 400).forEach(item => {
+        if (item.id === "_staffHistoryMeta") return;
         const order = item.data();
         const retainedItems = (order.items || []).filter(entry => !["completed", "denied"].includes(String(entry.status || "").toLowerCase()));
         deleted += (order.items || []).length - retainedItems.length;
@@ -4322,8 +4351,13 @@ window.firebaseData = {
       });
       await batch.commit();
     }
+    await setDoc(doc(db, "staffOrderHistory", "_staffHistoryMeta"), {
+      createdBy:"STAFF",
+      historyClearedAt,
+      historyBackfillV2:true
+    }, {merge:true});
     const remaining = await getDocs(collection(db, "staffOrderHistory"));
-    return {deleted, remaining:remaining.docs.map(item => ({...item.data(), docId:item.id}))};
+    return {deleted, remaining:remaining.docs.map(item => ({...item.data(), docId:item.id})).filter(order => Array.isArray(order.items))};
   },
   clearOrderHistory: async () => {
     let deleted = 0;
@@ -4471,7 +4505,7 @@ function startHistoryListeners() {
       }
     }, error => {
       console.error(`Could not load ${name}:`, error);
-      historyLoadError = `${name}: ${error.code || error.message || "read failed"}`;
+      if (!historyDataReady) historyLoadError = `${name}: ${error.code || error.message || "read failed"}`;
       historyInitialSnapshots.add(name);
       historyDataReady = targets.every(target => historyInitialSnapshots.has(target));
       if (historyDataReady && historyFallbackTimer) {
