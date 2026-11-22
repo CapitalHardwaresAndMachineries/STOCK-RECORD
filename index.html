@@ -1107,7 +1107,7 @@ th { background: #f1f5f9; }
      style="display:none">
 
     <h3>Update Inventory from Excel</h3>
-    <p class="small">Choose a workbook with Product ID, Product Name, Category, and Current Stock columns. Update replaces the current inventory with the rows in that file.</p>
+    <p class="small">Download gets live quantities from Firebase. Update replaces Firebase stock for the same products. Product IDs, names, and categories must match the GitHub catalogue; edit product_catalog.json on GitHub separately when adding, removing, or renaming products.</p>
     <input id="productImportFile" type="file" accept=".xlsx,.xls" aria-label="Choose Excel stock file" onchange="showSelectedInventoryFile()">
     <div class="inventory-update-actions">
         <button id="updateInventoryButton" class="yellow" type="button" onclick="updateInventoryFromFile()">Update</button>
@@ -1340,23 +1340,63 @@ th { background: #f1f5f9; }
 // DEMO PRODUCT DATA
 // ======================================
 
-let products = [
-    {id:"P001",name:"Samsung Charger",category:"Accessories",stock:50},
-    {id:"P002",name:"USB Cable",category:"Accessories",stock:120},
-    {id:"P003",name:"Keyboard",category:"Electronics",stock:25},
-    {id:"P004",name:"Computer Mouse",category:"Electronics",stock:30},
-    {id:"P005",name:"iPhone Charger",category:"Mobile Accessories",stock:20},
-    {id:"P006",name:"Bluetooth Speaker",category:"Electronics",stock:40},
-    {id:"P007",name:"Power Bank",category:"Accessories",stock:65},
-    {id:"P008",name:"Phone Case",category:"Mobile Accessories",stock:90},
-    {id:"P009",name:"Headphones",category:"Electronics",stock:35},
-    {id:"P010",name:"Screen Protector",category:"Mobile Accessories",stock:100},
-    {id:"P011",name:"Wireless Mouse",category:"Electronics",stock:25},
-    {id:"P012",name:"USB Adapter",category:"Accessories",stock:45}
-];
+let products = [];
+let catalogProducts = [];
+let stockCacheTimes = new Map();
+let stockFetchPromises = new Map();
+let inventoryLoadToken = 0;
+let orderSearchToken = 0;
+let returnSearchToken = 0;
+let orderSearchTimer = null;
+let returnSearchTimer = null;
+let dashboardStockSummary = {productCount:0,totalStock:0,loaded:false};
+const PRODUCT_CATALOG_URL = "https://capitalhardwaresandmachineries.github.io/STOCK-RECORD/product_catalog.json";
 window.productDataReady = false;
 window.ordersDataReady = false;
 let productUpdateBusy = false;
+
+function mergeCatalogWithStock() {
+    const stockById = new Map(products.map(product => [String(product.id), product]));
+    products = catalogProducts.map(item => {
+        const stockProduct = stockById.get(String(item.id));
+        return {...item, stock:stockProduct ? Number(stockProduct.stock) || 0 : 0,
+            stockReady:Boolean(stockProduct && stockProduct.stockReady)};
+    });
+}
+
+function updateCachedStock(rows) {
+    const receivedAt = Date.now();
+    const stockById = new Map(products.map(product => [String(product.id), product]));
+    rows.forEach(row => {
+        const id = String(row.id);
+        const catalogItem = catalogProducts.find(item => String(item.id) === id);
+        if (!catalogItem) return;
+        stockById.set(id, {...catalogItem, stock:Number(row.stock) || 0, stockReady:true});
+        stockCacheTimes.set(id, receivedAt);
+    });
+    products = catalogProducts.map(item => stockById.get(String(item.id)) ||
+        {...item, stock:0, stockReady:false});
+}
+
+async function loadStockForIds(ids, force = false) {
+    const uniqueIds = [...new Set(ids.map(id => String(id)))];
+    const now = Date.now();
+    const idsToLoad = uniqueIds.filter(id => force || !stockCacheTimes.has(id) || now - stockCacheTimes.get(id) > 15000);
+    if (!idsToLoad.length) return;
+    const pending = idsToLoad.filter(id => !stockFetchPromises.has(id));
+    const promises = idsToLoad.map(id => stockFetchPromises.get(id)).filter(Boolean);
+    if (pending.length) {
+        const fetchPromise = window.firebaseData.getProductStocks(pending);
+        pending.forEach(id => stockFetchPromises.set(id, fetchPromise));
+        promises.push(fetchPromise);
+    }
+    try {
+        const rowGroups = await Promise.all(promises);
+        updateCachedStock(rowGroups.flat());
+    } finally {
+        idsToLoad.forEach(id => stockFetchPromises.delete(id));
+    }
+}
 
 let orders = [];
 // Cleared management records stay available to history pages in this collection.
@@ -1503,7 +1543,7 @@ function showPage(id, button) {
 
     if (button) button.classList.add("active");
 
-    if (id === "inventory") renderInventory();
+    if (id === "inventory") renderInventory(true);
     if (id === "management") renderManagement();
     if (id === "history") renderOrderHistory();
     if (id === "staffhistory") renderStaffOrderHistory();
@@ -1518,12 +1558,12 @@ function showPage(id, button) {
 // INVENTORY
 // ======================================
 
-function renderInventory() {
+async function renderInventory(forceStockRefresh = false) {
 
     let query = document.getElementById("inventorySearch")
         .value.toLowerCase().trim();
 
-    let filtered = products.filter(p =>
+    let filtered = catalogProducts.filter(p =>
         [p.id,p.name,p.category].some(value =>
             String(value || "").toLowerCase().includes(query)
         )
@@ -1533,6 +1573,7 @@ function renderInventory() {
     inventoryPage = Math.max(1, Math.min(inventoryPage, totalPages));
     const startIndex = (inventoryPage - 1) * INVENTORY_ITEMS_PER_PAGE;
     const visibleProducts = filtered.slice(startIndex, startIndex + INVENTORY_ITEMS_PER_PAGE);
+    const loadToken = ++inventoryLoadToken;
 
     let header = `
         <th>Product ID</th>
@@ -1550,13 +1591,16 @@ function renderInventory() {
 
     document.getElementById("inventoryBody").innerHTML =
 
-        visibleProducts.map(p => `
+        visibleProducts.map(catalogProduct => {
+            const p = products.find(item => item.id === catalogProduct.id) ||
+                {...catalogProduct,stock:0,stockReady:false};
+            return `
 
         <tr>
             <td>${escapeHTML(p.id)}</td>
             <td class="important-product-name">${escapeHTML(p.name)}</td>
             <td>${escapeHTML(p.category)}</td>
-            <td class="important-stock-value">${p.stock}</td>
+            <td class="important-stock-value">${p.stockReady ? p.stock : "Loading…"}</td>
 
             ${role === "admin" ? `
 
@@ -1564,12 +1608,12 @@ function renderInventory() {
                 <div class="actions">
 
                     <button class="green"
-                    onclick="stockChange('${escapeAttr(p.id)}','in')">
+                    onclick="stockChange('${escapeAttr(p.id)}','in')" ${p.stockReady ? "" : "disabled"}>
                         IN
                     </button>
 
                     <button class="red"
-                    onclick="stockChange('${escapeAttr(p.id)}','out')">
+                    onclick="stockChange('${escapeAttr(p.id)}','out')" ${p.stockReady ? "" : "disabled"}>
                         OUT
                     </button>
 
@@ -1580,7 +1624,8 @@ function renderInventory() {
 
         </tr>
 
-        `).join("") || `<tr><td colspan="${role === "admin" ? 5 : 4}">No products found.</td></tr>`;
+        `;
+        }).join("") || `<tr><td colspan="${role === "admin" ? 5 : 4}">No products found.</td></tr>`;
 
     const showingFrom = filtered.length ? startIndex + 1 : 0;
     const showingTo = Math.min(startIndex + INVENTORY_ITEMS_PER_PAGE, filtered.length);
@@ -1589,12 +1634,24 @@ function renderInventory() {
     document.getElementById("inventoryPreviousPage").disabled = inventoryPage <= 1;
     document.getElementById("inventoryNextPage").disabled = inventoryPage >= totalPages;
 
+    if (!window.productDataReady || !visibleProducts.length) return;
+    try {
+        await loadStockForIds(visibleProducts.map(product => product.id), forceStockRefresh);
+        if (loadToken === inventoryLoadToken) renderInventory(false);
+    } catch (error) {
+        console.error("Could not load inventory page stock:", error);
+        if (loadToken === inventoryLoadToken) {
+            document.getElementById("inventoryPageInfo").textContent =
+                "Could not load stock quantities. Check Firebase access and retry.";
+        }
+    }
+
 }
 
 
 function changeInventoryPage(direction) {
     inventoryPage += direction;
-    renderInventory();
+    renderInventory(true);
 }
 
 
@@ -1603,7 +1660,7 @@ function changeInventoryPage(direction) {
 // ADMIN ONLY
 // ======================================
 
-function stockChange(id, type) {
+async function stockChange(id, type) {
 
     if (role !== "admin") {
         alert("Only Admin can change stock.");
@@ -1612,7 +1669,7 @@ function stockChange(id, type) {
 
     let p = products.find(x => x.id === id);
 
-    if (!p) return;
+    if (!p || !p.stockReady) return;
 
     let qty = Number(prompt("Enter quantity:"));
 
@@ -1621,20 +1678,21 @@ function stockChange(id, type) {
         return;
     }
 
-    if (type === "out" && qty > p.stock) {
-        alert("Not enough stock available.");
+    try {
+        const updated = await window.firebaseData.adjustStock(id, qty, type);
+        updateCachedStock([updated]);
+        stockCacheTimes.set(String(id), Date.now());
+    } catch (error) {
+        alert(error.message || "Could not update stock. Refresh and try again.");
         return;
     }
-
-    p.stock += type === "in" ? qty : -qty;
-    persistFirebase(window.firebaseData?.setProduct(p));
 
     addActivity(
         `${type.toUpperCase()} ${qty} units of ${p.name}`
     );
 
     renderInventory();
-    updateDashboard();
+    refreshDashboardStockSummary();
 
 }
 
@@ -1729,10 +1787,23 @@ async function updateInventoryFromFile() {
     try {
         status.textContent = "Checking workbook…";
         const incomingProducts = await readInventoryWorkbook(file);
-        const currentCount = products.length;
+        const currentCount = catalogProducts.length;
+        const catalogById = new Map(catalogProducts.map(product => [String(product.id), product]));
+        const catalogMismatch = incomingProducts.length !== catalogProducts.length ||
+            incomingProducts.some(product => {
+                const catalogItem = catalogById.get(String(product.id));
+                return !catalogItem || catalogItem.name !== product.name || catalogItem.category !== product.category;
+            });
+        if (catalogMismatch) {
+            throw new Error("This workbook's product IDs, names, or categories do not match the GitHub catalogue. Update product_catalog.json on GitHub first, wait for it to publish, then upload the stock workbook again.");
+        }
+        const normalizedInventory = incomingProducts.map(product => ({
+            ...catalogById.get(String(product.id)),
+            stock:product.stock
+        }));
         const confirmUpdate = confirm(
-            `Delete all ${currentCount} current product records and import ${incomingProducts.length} rows from this workbook?\n\n` +
-            `Order history and stock movement history will remain unchanged. If the upload is interrupted, select this workbook and press Update again to finish.`
+            `Replace Firebase stock quantities for ${currentCount} products using ${normalizedInventory.length} rows from this workbook?\n\n` +
+            `This changes Firebase inventory only. The GitHub catalogue, orders, and history stay unchanged.`
         );
         if (!confirmUpdate) {
             status.textContent = "Update cancelled. Current inventory was not changed.";
@@ -1742,19 +1813,18 @@ async function updateInventoryFromFile() {
             throw new Error("Firebase is not ready. Refresh the page and try again.");
         }
 
-        const currentIds = products.map(product => product.id);
         const result = await window.firebaseData.replaceProductInventory(
-            incomingProducts,
-            currentIds,
+            normalizedInventory,
             progress => { status.textContent = progress; }
         );
-        products = incomingProducts;
+        products = normalizedInventory.map(product => ({...product, stockReady:true}));
+        stockCacheTimes = new Map(products.map(product => [String(product.id), Date.now()]));
         inventoryPage = 1;
         document.getElementById("inventorySearch").value = "";
         document.getElementById("productImportFile").value = "";
         renderInventory();
         updateDashboard();
-        status.textContent = `Inventory replaced: ${result.updated} new rows imported; ${result.removed} old product records deleted. Order history was unchanged.`;
+        status.textContent = `Firebase stock updated: ${result.updated} rows saved; ${result.removed} old product records removed. Order history was unchanged.`;
     } catch (error) {
         console.error("Inventory replacement stopped:", error);
         status.textContent = error.message || "Could not update inventory. Check Firebase access and try again.";
@@ -1766,31 +1836,39 @@ async function updateInventoryFromFile() {
     }
 }
 
-function downloadCurrentStock() {
+async function downloadCurrentStock() {
     const status = document.getElementById("productImportStatus");
     if (role !== "admin") {
         alert("Only Admin can download the stock workbook.");
         return;
     }
     if (!window.productDataReady) {
-        status.textContent = "Inventory is still loading. Wait a moment and try again.";
+        status.textContent = "The product catalogue is still loading. Wait a moment and try again.";
         return;
     }
     if (!window.XLSX) {
         status.textContent = "The Excel writer did not load. Check your connection and refresh the page.";
         return;
     }
-    const rows = [
-        ["Product ID", "Product Name", "Category", "Current Stock"],
-        ...[...products]
-            .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, {numeric:true}))
-            .map(product => [String(product.id), product.name, product.category, Number(product.stock) || 0])
-    ];
-    const sheet = window.XLSX.utils.aoa_to_sheet(rows);
-    const workbook = window.XLSX.utils.book_new();
-    window.XLSX.utils.book_append_sheet(workbook, sheet, "Current Stock");
-    window.XLSX.writeFile(workbook, "Current_Stock.xlsx");
-    status.textContent = `Downloaded ${products.length} current products. Edit this file and use Update to replace inventory.`;
+    status.textContent = "Downloading current stock from Firebase…";
+    try {
+        const stockRows = await window.firebaseData.getAllProductStocks();
+        const stockById = new Map(stockRows.map(product => [String(product.id), Number(product.stock) || 0]));
+        const rows = [
+            ["Product ID", "Product Name", "Category", "Current Stock"],
+            ...[...catalogProducts]
+                .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, {numeric:true}))
+                .map(product => [String(product.id), product.name, product.category, stockById.get(String(product.id)) ?? 0])
+        ];
+        const sheet = window.XLSX.utils.aoa_to_sheet(rows);
+        const workbook = window.XLSX.utils.book_new();
+        window.XLSX.utils.book_append_sheet(workbook, sheet, "Current Stock");
+        window.XLSX.writeFile(workbook, "Current_Stock.xlsx");
+        status.textContent = `Downloaded ${catalogProducts.length} products with current stock from Firebase. Edit stock quantities, then use Update.`;
+    } catch (error) {
+        console.error("Could not download current Firebase stock:", error);
+        status.textContent = error.message || "Could not download current stock from Firebase. Check your connection and try again.";
+    }
 }
 
 
@@ -1866,21 +1944,26 @@ function searchProducts() {
 
     let query = document.getElementById("orderSearch")
         .value.toLowerCase().trim();
+    const loadToken = ++orderSearchToken;
+    clearTimeout(orderSearchTimer);
 
     if (!query) {
         document.getElementById("searchResults").innerHTML = "";
         return;
     }
 
-    let results = products.filter(p =>
+    let allResults = catalogProducts.filter(p =>
         [p.id,p.name,p.category].some(v =>
-            v.toLowerCase().includes(query)
+            String(v || "").toLowerCase().includes(query)
         )
     );
+    const results = allResults.slice(0, 30);
 
     document.getElementById("searchResults").innerHTML =
 
         results.map(p => {
+            const stockProduct = products.find(item => item.id === p.id);
+            const product = stockProduct || {...p, stock:0, stockReady:false};
             const cartItem = cart.find(item => item.id === p.id);
             const locked = isProductLockedForManagement(p.id) || isProductAlreadyInEitherCart(p.id);
             const waitingForOrders = !window.ordersDataReady;
@@ -1894,7 +1977,7 @@ function searchProducts() {
             <div class="product-result-main">
                 <strong>${escapeHTML(p.name)}</strong>
                 <div class="small">
-                    ${escapeHTML(p.id)} · ${escapeHTML(p.category)} · Available: ${p.stock}
+                    ${escapeHTML(p.id)} · ${escapeHTML(p.category)} · Available: ${product.stockReady ? product.stock : "Loading…"}
                 </div>
             </div>
 
@@ -1903,15 +1986,15 @@ function searchProducts() {
                     id="orderQty-${escapeAttr(p.id)}"
                     type="number"
                     min="0"
-                    max="${p.stock}"
+                    max="${product.stock}"
                     value="${escapeAttr(quantityValue)}"
                     oninput="setOrderQuantityDraft('${escapeAttr(p.id)}',this.value)"
                     aria-label="Order quantity for ${escapeAttr(p.name)}"
-                    ${locked || waitingForOrders || p.stock <= 0 ? "disabled" : ""}>
+                    ${locked || waitingForOrders || !product.stockReady || product.stock <= 0 ? "disabled" : ""}>
                 <button class="add-to-cart-button ${locked ? "added-locked" : ""}"
                     onclick="addToCart('${escapeAttr(p.id)}')"
-                    ${locked || waitingForOrders || p.stock <= 0 ? "disabled" : ""}>
-                    ${locked ? "Added ✓" : waitingForOrders ? "Loading…" : "Add"}
+                    ${locked || waitingForOrders || !product.stockReady || product.stock <= 0 ? "disabled" : ""}>
+                    ${locked ? "Added ✓" : waitingForOrders || !product.stockReady ? "Loading…" : "Add"}
                 </button>
             </div>
 
@@ -1920,6 +2003,26 @@ function searchProducts() {
         `;
         }).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
 
+    if (results.length && window.productDataReady) {
+        clearTimeout(orderSearchTimer);
+        orderSearchTimer = setTimeout(async () => {
+            try {
+                await loadStockForIds(results.map(product => product.id));
+                if (loadToken === orderSearchToken) searchProducts();
+            } catch (error) {
+                console.error("Could not load matching product stock:", error);
+                if (loadToken === orderSearchToken) {
+                    document.getElementById("searchResults").insertAdjacentHTML("beforeend",
+                        '<div class="small" style="padding:8px 0;color:#b91c1c">Could not load stock. Check Firebase access and try again.</div>');
+                }
+            }
+        }, 250);
+    }
+    if (allResults.length > results.length) {
+        document.getElementById("searchResults").insertAdjacentHTML("beforeend",
+            `<div class="small" style="padding:8px 0">Showing first ${results.length} matches. Add more letters to narrow the search.</div>`);
+    }
+
 }
 
 
@@ -1927,12 +2030,18 @@ function searchProducts() {
 // ORDER ITEMS
 // ======================================
 
-function addToCart(id) {
+async function addToCart(id) {
 
     if (!window.ordersDataReady) return;
+    try {
+        await loadStockForIds([id], true);
+    } catch (error) {
+        alert("Could not check current product stock. Check your connection and try again.");
+        return;
+    }
     let p = products.find(x => x.id === id);
 
-    if (!p) return;
+    if (!p || !p.stockReady) return;
 
     if (isProductLockedForManagement(id) || isProductAlreadyInEitherCart(id)) return;
 
@@ -2058,16 +2167,21 @@ function toggleReturnCustomer() {
 
 function searchReturnProducts() {
     const query = document.getElementById("returnSearch").value.toLowerCase().trim();
+    const loadToken = ++returnSearchToken;
+    clearTimeout(returnSearchTimer);
     if (!query) {
         document.getElementById("returnSearchResults").innerHTML = "";
         return;
     }
-    const results = products.filter(product =>
+    const allResults = catalogProducts.filter(product =>
         [product.id, product.name, product.category].some(value =>
             String(value || "").toLowerCase().includes(query)
         )
     );
+    const results = allResults.slice(0, 30);
     document.getElementById("returnSearchResults").innerHTML = results.map(product => {
+        const stockProduct = products.find(item => item.id === product.id);
+        const currentProduct = stockProduct || {...product, stock:0, stockReady:false};
         const cartItem = returnCart.find(item => item.id === product.id);
         const locked = isProductLockedForManagement(product.id) || isProductAlreadyInEitherCart(product.id);
         const waitingForOrders = !window.ordersDataReady;
@@ -2078,27 +2192,52 @@ function searchReturnProducts() {
         <div class="product-result">
             <div class="product-result-main">
                 <strong>${escapeHTML(product.name)}</strong>
-                <div class="small">${escapeHTML(product.id)} · ${escapeHTML(product.category)} · Current stock: ${product.stock}</div>
+                <div class="small">${escapeHTML(product.id)} · ${escapeHTML(product.category)} · Current stock: ${currentProduct.stockReady ? currentProduct.stock : "Loading…"}</div>
             </div>
             <div class="product-order-controls">
                 <input id="returnQty-${escapeAttr(product.id)}" type="number" min="0"
                        value="${escapeAttr(quantityValue)}"
                        oninput="setReturnQuantityDraft('${escapeAttr(product.id)}',this.value)"
                        aria-label="Return quantity for ${escapeAttr(product.name)}"
-                       ${locked || waitingForOrders ? "disabled" : ""}>
+                       ${locked || waitingForOrders || !currentProduct.stockReady ? "disabled" : ""}>
                 <button class="add-to-cart-button ${locked ? "added-locked" : ""}" type="button"
-                        onclick="addToReturnCart('${escapeAttr(product.id)}')" ${locked || waitingForOrders ? "disabled" : ""}>
-                    ${locked ? "Added ✓" : waitingForOrders ? "Loading…" : "Add"}
+                        onclick="addToReturnCart('${escapeAttr(product.id)}')" ${locked || waitingForOrders || !currentProduct.stockReady ? "disabled" : ""}>
+                    ${locked ? "Added ✓" : waitingForOrders || !currentProduct.stockReady ? "Loading…" : "Add"}
                 </button>
             </div>
         </div>
     `;
     }).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
+    if (results.length && window.productDataReady) {
+        clearTimeout(returnSearchTimer);
+        returnSearchTimer = setTimeout(async () => {
+            try {
+                await loadStockForIds(results.map(product => product.id));
+                if (loadToken === returnSearchToken) searchReturnProducts();
+            } catch (error) {
+                console.error("Could not load matching return stock:", error);
+                if (loadToken === returnSearchToken) {
+                    document.getElementById("returnSearchResults").insertAdjacentHTML("beforeend",
+                        '<div class="small" style="padding:8px 0;color:#b91c1c">Could not load stock. Check Firebase access and try again.</div>');
+                }
+            }
+        }, 250);
+    }
+    if (allResults.length > results.length) {
+        document.getElementById("returnSearchResults").insertAdjacentHTML("beforeend",
+            `<div class="small" style="padding:8px 0">Showing first ${results.length} matches. Add more letters to narrow the search.</div>`);
+    }
 }
 
 
-function addToReturnCart(id) {
+async function addToReturnCart(id) {
     if (!window.ordersDataReady) return;
+    try {
+        await loadStockForIds([id], true);
+    } catch (error) {
+        alert("Could not check current product stock. Check your connection and try again.");
+        return;
+    }
     const product = products.find(item => item.id === id);
     if (isProductLockedForManagement(id) || isProductAlreadyInEitherCart(id)) return;
     const quantityInput = document.getElementById("returnQty-" + id);
@@ -2432,6 +2571,15 @@ function renderManagement() {
         return;
     }
 
+    if (document.getElementById("management")?.classList.contains("active")) {
+        const activeProductIds = [...new Set(orders.flatMap(order =>
+            (Array.isArray(order.items) ? order.items : []).map(item => String(item.id))
+        ))];
+        loadStockForIds(activeProductIds).then(() => {
+            if (document.getElementById("management")?.classList.contains("active")) renderManagement();
+        }).catch(error => console.error("Could not refresh stock for active orders:", error));
+    }
+
     // Collect every order line, then group all lines by category.
     const orderTime = order =>
         Number(order.createdAtValue || 0) || Date.parse(order.date || "") || 0;
@@ -2670,7 +2818,11 @@ async function stockOutItem(orderId, productId) {
     }
 
     const localProduct = products.find(p => p.id === productId);
-    if (localProduct) localProduct.stock = completed.product.stock;
+    if (localProduct) {
+        localProduct.stock = completed.product.stock;
+        localProduct.stockReady = true;
+        stockCacheTimes.set(String(productId), Date.now());
+    }
     const localOrder = orders.find(current => orderRecordKey(current) === orderId);
     if (localOrder) Object.assign(localOrder, completed.order);
     stockMovementHistory = [
@@ -2684,7 +2836,7 @@ async function stockOutItem(orderId, productId) {
     renderManagement();
     renderInventory();
     renderOrderHistory();
-    updateDashboard();
+    refreshDashboardStockSummary();
 
 }
 
@@ -2712,7 +2864,11 @@ async function stockInReturn(orderId, productId) {
     }
 
     const localProduct = products.find(current => current.id === productId);
-    if (localProduct) localProduct.stock = completed.product.stock;
+    if (localProduct) {
+        localProduct.stock = completed.product.stock;
+        localProduct.stockReady = true;
+        stockCacheTimes.set(String(productId), Date.now());
+    }
     const localOrder = orders.find(current => orderRecordKey(current) === orderId);
     if (localOrder) Object.assign(localOrder, completed.order);
     const completedItem = completed.order.items.find(current => current.id === productId);
@@ -2726,7 +2882,7 @@ async function stockInReturn(orderId, productId) {
     renderManagement();
     renderInventory();
     renderOrderHistory();
-    updateDashboard();
+    refreshDashboardStockSummary();
 }
 
 
@@ -2737,10 +2893,10 @@ async function stockInReturn(orderId, productId) {
 function updateDashboard() {
 
     document.getElementById("totalProducts").textContent =
-        products.length;
+        catalogProducts.length;
 
     document.getElementById("totalStock").textContent =
-        products.reduce((sum,p) => sum + p.stock, 0);
+        dashboardStockSummary.loaded ? dashboardStockSummary.totalStock : "…";
 
     // Count each pending product line separately, even when
     // several pending items belong to the same order/category.
@@ -2756,7 +2912,7 @@ function updateDashboard() {
     const previous = select.value || "All Categories";
 
     const categories = [
-        ...new Set(products.map(p => p.category))
+        ...new Set(catalogProducts.map(p => p.category))
     ].sort();
 
     select.innerHTML = `
@@ -2779,6 +2935,15 @@ function updateDashboard() {
 
     renderPopularItems();
 
+}
+
+async function refreshDashboardStockSummary() {
+    try {
+        dashboardStockSummary = {...await window.firebaseData.getStockSummary(),loaded:true};
+        updateDashboard();
+    } catch (error) {
+        console.error("Could not refresh dashboard stock totals:", error);
+    }
 }
 
 
@@ -3383,7 +3548,6 @@ function escapeAttr(value) {
 
 // Firebase authentication and database state bridge.
 window.stockAppApplyFirebaseData = function(data) {
-    if (Array.isArray(data.products)) products = data.products;
     if (Array.isArray(data.orders)) orders = data.orders;
     if (Array.isArray(data.orderHistory)) orderHistory = data.orderHistory;
     if (Array.isArray(data.archivedOrders)) archivedOrders = data.archivedOrders;
@@ -3399,12 +3563,12 @@ window.stockAppApplyFirebaseData = function(data) {
       updateReturnSubmitButton();
     }
     if (document.getElementById("stockApp").style.display !== "none") {
-        renderInventory();
-        renderManagement();
-        renderOrderHistory();
-        renderStaffOrderHistory();
-        searchProducts();
-        searchReturnProducts();
+        if (document.getElementById("inventory")?.classList.contains("active")) renderInventory();
+        if (document.getElementById("management")?.classList.contains("active")) renderManagement();
+        if (document.getElementById("history")?.classList.contains("active")) renderOrderHistory();
+        if (document.getElementById("staffhistory")?.classList.contains("active")) renderStaffOrderHistory();
+        if (document.getElementById("order")?.classList.contains("active")) searchProducts();
+        if (document.getElementById("returns")?.classList.contains("active")) searchReturnProducts();
         updateDashboard();
     }
 };
@@ -3503,7 +3667,8 @@ setInterval(() => {
 import { initializeApp } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js";
 import {
-  getFirestore, collection, doc, getDoc, onSnapshot, runTransaction, setDoc, writeBatch
+  getFirestore, collection, doc, getDoc, getDocs, onSnapshot, runTransaction, setDoc, writeBatch,
+  query, where, documentId, getAggregateFromServer, count, sum
 } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -3623,6 +3788,41 @@ window.firebaseSignOut = async () => {
 };
 window.firebaseData = {
   setProduct: product => setDoc(doc(db, "products", product.id), product),
+  adjustStock: (productId, quantity, movement) => runTransaction(db, async transaction => {
+    const productRef = doc(db, "products", productId);
+    const snapshot = await transaction.get(productRef);
+    if (!snapshot.exists()) throw new Error("This product does not have a Firebase stock record.");
+    const product = {...snapshot.data(), id:productId};
+    const currentStock = Number(product.stock || 0);
+    if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error("Enter a valid quantity.");
+    if (movement === "out" && quantity > currentStock) throw new Error("Not enough stock available.");
+    product.stock = currentStock + (movement === "in" ? quantity : -quantity);
+    transaction.set(productRef, product);
+    return {...product,stockReady:true};
+  }),
+  getProductStocks: async ids => {
+    const requested = [...new Set(ids.map(id => String(id)))];
+    const rows = [];
+    for (let offset = 0; offset < requested.length; offset += 30) {
+      const chunk = requested.slice(offset, offset + 30);
+      const stockQuery = query(collection(db, "products"), where(documentId(), "in", chunk));
+      const snapshot = await getDocs(stockQuery);
+      const found = new Map(snapshot.docs.map(item => [item.id, {...item.data(), id:item.id, stockReady:true}]));
+      chunk.forEach(id => rows.push(found.get(id) || {id, stock:0, stockReady:true}));
+    }
+    return rows;
+  },
+  getAllProductStocks: async () => {
+    const snapshot = await getDocs(collection(db, "products"));
+    return snapshot.docs.map(item => ({...item.data(), id:item.id, stockReady:true}));
+  },
+  getStockSummary: async () => {
+    const snapshot = await getAggregateFromServer(collection(db, "products"), {
+      productCount:count(),
+      totalStock:sum("stock")
+    });
+    return {productCount:Number(snapshot.data().productCount || 0), totalStock:Number(snapshot.data().totalStock || 0)};
+  },
   completeStockOut: (orderId, productId) => runTransaction(db, async transaction => {
     const orderRef = doc(db, "orders", orderId);
     const productRef = doc(db, "products", productId);
@@ -3736,24 +3936,16 @@ window.firebaseData = {
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
     return {product:productData, order:orderData, historyEvent};
   }),
-  replaceProductInventory: async (productsToSave, existingIds, onProgress) => {
-    const removedIds = [...new Set(existingIds)];
+  replaceProductInventory: async (productsToSave, onProgress) => {
+    const existingSnapshot = await getDocs(collection(db, "products"));
+    const newIds = new Set(productsToSave.map(product => String(product.id)));
+    const removedIds = existingSnapshot.docs.map(item => item.id).filter(id => !newIds.has(id));
     const chunkSize = 300;
     let saved = 0;
     let removed = 0;
 
     try {
-      // Empty the products collection first so every workbook import starts
-      // from a clean inventory. History collections are not touched here.
-      for (let offset = 0; offset < removedIds.length; offset += chunkSize) {
-        const chunk = removedIds.slice(offset, offset + chunkSize);
-        const batch = writeBatch(db);
-        chunk.forEach(id => batch.delete(doc(db, "products", id)));
-        await batch.commit();
-        removed += chunk.length;
-        if (onProgress) onProgress(`Deleting current product records… ${removed} of ${removedIds.length}`);
-      }
-
+      // Save the new stock first; only then delete products absent from the file.
       for (let offset = 0; offset < productsToSave.length; offset += chunkSize) {
         const chunk = productsToSave.slice(offset, offset + chunkSize);
         const batch = writeBatch(db);
@@ -3761,6 +3953,14 @@ window.firebaseData = {
         await batch.commit();
         saved += chunk.length;
         if (onProgress) onProgress(`Importing workbook rows… ${saved} of ${productsToSave.length}`);
+      }
+      for (let offset = 0; offset < removedIds.length; offset += chunkSize) {
+        const chunk = removedIds.slice(offset, offset + chunkSize);
+        const batch = writeBatch(db);
+        chunk.forEach(id => batch.delete(doc(db, "products", id)));
+        await batch.commit();
+        removed += chunk.length;
+        if (onProgress) onProgress(`Removing products absent from the workbook… ${removed} of ${removedIds.length}`);
       }
       return {updated:saved, removed};
     } catch (error) {
@@ -3822,16 +4022,15 @@ function listenCollection(name, callback) {
   }));
 }
 
-function startWorkspace(user, role) {
+async function startWorkspace(user, role) {
   clearListeners();
+  window.productDataReady = false;
   window.ordersDataReady = false;
   orderSequenceReady = false;
   updateOrderSubmitButton();
   updateReturnSubmitButton();
-  window.stockAppSetRole(role, user.email);
-  const data = {products: [], orders: [], orderHistory: [], archivedOrders: [], stockMovementHistory: [], settings: {}, settingsReady: false};
+  const data = {orders: [], orderHistory: [], archivedOrders: [], stockMovementHistory: [], settings: {}, settingsReady: false};
   const publish = () => window.stockAppApplyFirebaseData(data);
-  listenCollection("products", rows => { data.products = rows; publish(); });
   listenCollection("orders", rows => { data.orders = rows; publish(); });
   listenCollection("orderHistory", rows => { data.orderHistory = rows; publish(); });
   listenCollection("archivedOrders", rows => { data.archivedOrders = rows; publish(); });
@@ -3844,6 +4043,34 @@ function startWorkspace(user, role) {
     console.error("Could not load app settings:", error);
     window.stockAppShowLogin("Unable to load settings. Check the Firestore rules in your project.");
   }));
+  const response = await fetch(PRODUCT_CATALOG_URL, {cache:"no-store"});
+  if (!response.ok) throw new Error(`Could not load GitHub product catalogue (HTTP ${response.status}).`);
+  const payload = await response.json();
+  if (!payload || !Array.isArray(payload.products) || payload.products.length === 0) {
+    throw new Error("The GitHub product catalogue is empty or has an invalid format.");
+  }
+  const catalogIds = new Set();
+  catalogProducts = payload.products.map((item, index) => {
+    const id = String(item.id ?? "").trim();
+    const name = String(item.name ?? "").trim();
+    const category = String(item.category ?? "").trim();
+    if (!id || !name || !category || catalogIds.has(id)) {
+      throw new Error(`The GitHub product catalogue has a missing field or duplicate ID at item ${index + 1}.`);
+    }
+    catalogIds.add(id);
+    return {id,name,category};
+  });
+  products = catalogProducts.map(item => ({...item,stock:0,stockReady:false}));
+  stockCacheTimes.clear();
+  window.productDataReady = true;
+  window.stockAppSetRole(role, user.email);
+  publish();
+  try {
+    dashboardStockSummary = {...await window.firebaseData.getStockSummary(), loaded:true};
+    updateDashboard();
+  } catch (error) {
+    console.error("Could not load dashboard stock totals:", error);
+  }
 }
 
 onAuthStateChanged(auth, async user => {
@@ -3853,6 +4080,11 @@ onAuthStateChanged(auth, async user => {
     stopIdleLogoutTimer();
     if (idleTrackedUid) clearSavedActivity(idleTrackedUid);
     idleTrackedUid = "";
+    window.productDataReady = false;
+    products = [];
+    catalogProducts = [];
+    stockCacheTimes.clear();
+    dashboardStockSummary = {productCount:0,totalStock:0,loaded:false};
     window.ordersDataReady = false;
     clearListeners();
     orderSequenceReady = false;
@@ -3884,9 +4116,14 @@ onAuthStateChanged(auth, async user => {
       await signOut(auth);
       return;
     }
-    startWorkspace(user, role);
+    await startWorkspace(user, role);
   } catch (error) {
     console.error("Could not load Firebase user profile:", error);
+    if (String(error.message || "").includes("GitHub product catalogue")) {
+      signOutMessage = error.message;
+      await signOut(auth);
+      return;
+    }
     window.stockAppShowLogin(error.code === "permission-denied"
       ? "Firestore denied access to your user profile. Publish the Firestore rules, then sign in again."
       : error.code === "firestore/profile-timeout"
