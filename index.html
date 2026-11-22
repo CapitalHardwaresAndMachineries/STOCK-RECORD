@@ -3280,21 +3280,13 @@ async function ensureStaffHistoryLoaded() {
         }
         const existingHistory = await window.firebaseData.getStaffHistory();
         const meta = existingHistory.find(order => order.docId === "_staffHistoryMeta") || {};
-        if (!meta.historyBackfillV2) {
+        if (!meta.historyBackfillV3) {
             const legacy = await window.firebaseData.getLegacyStaffOrders();
             const previousClearAt = Number(meta.historyClearedAt || settings.staffHistoryClearedAt || 0);
-            const eligibleLegacy = legacy.map(order => ({
-                ...order,
-                items:(order.items || []).filter(item => {
-                    const status = String(item.status || "").toLowerCase();
-                    if (!["completed", "denied"].includes(status)) return true;
-                    const itemAt = Number(item.completedAtValue || order.createdAtValue || 0);
-                    return !previousClearAt || itemAt > previousClearAt;
-                })
-            })).filter(order => order.items.length > 0);
+            const eligibleLegacy = legacy.filter(order => order.items.length > 0);
             const cleanExisting = existingHistory.filter(order => Array.isArray(order.items));
             await window.firebaseData.seedStaffHistory(mergeStaffHistoryRecords(cleanExisting, eligibleLegacy));
-            await window.firebaseData.saveStaffHistoryMeta({historyBackfillV2:true, historyClearedAt:previousClearAt});
+            await window.firebaseData.saveStaffHistoryMeta({historyBackfillV2:true, historyBackfillV3:true, historyClearedAt:previousClearAt});
         }
         staffOrderHistory = await window.firebaseData.getStaffHistory();
         staffHistoryReady = true;
@@ -3431,8 +3423,9 @@ async function clearStaffOrderHistory() {
 
 function getAdminOrderHistoryItems() {
 
-    const decisionEvents = orderHistory.filter(event => event.recordType === "decision");
-    const historyItems = [...stockMovementHistory, ...decisionEvents].map(event => ({...event}));
+    const historyItems = stockMovementHistory
+        .filter(event => String(event.status || "").toLowerCase() === "completed")
+        .map(event => ({...event}));
     const recordedEventIds = new Set(stockMovementHistory.map(event => event.id));
     const recordedOrderItems = new Set(stockMovementHistory.map(event =>
         `${event.orderRecordId}:${event.productId}`
@@ -3442,14 +3435,16 @@ function getAdminOrderHistoryItems() {
     // stock movement records were added, plus orders cleared before processing.
     [
         ...archivedOrders.map(order => ({...order, retainedInHistory:true})),
-        ...orderHistory.map(order => ({...order, retainedInHistory:true}))
+        ...orderHistory.map(order => ({...order, retainedInHistory:true})),
+        ...orders
     ].filter(order => Array.isArray(order.items)).forEach(order => {
         order.items.forEach(item => {
+            const normalizedStatus = String(item.status || "").toLowerCase();
+            if (!["completed", "pending"].includes(normalizedStatus)) return;
             const hasImmutableMovement = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
                 recordedOrderItems.has(`${order.recordId || orderRecordKey(order)}:${item.id}`);
             if (item.status === "Completed" && item.historyEventId && !recordedEventIds.has(item.historyEventId)) return;
             if (item.status === "Completed" && hasImmutableMovement) return;
-            if (item.status !== "Completed" && !order.retainedInHistory) return;
 
             const historyDateValue =
                 item.completedAtValue ||
@@ -3460,9 +3455,9 @@ function getAdminOrderHistoryItems() {
             historyItems.push({
                 orderId: order.id,
                 type: order.type,
-                movement: item.status === "Completed"
+                movement: normalizedStatus === "completed"
                     ? (order.kind === "return" ? "Stock IN" : "Stock OUT")
-                    : (order.kind === "return" ? "Cleared Return" : "Cleared Order"),
+                    : (order.kind === "return" ? "Pending Return" : "Pending Order"),
                 status: item.status,
                 createdBy: order.createdBy,
                 orderDate: order.date,
@@ -4291,11 +4286,13 @@ window.firebaseData = {
     const snapshots = await Promise.all([
       getDocs(collection(db, "orders")),
       getDocs(collection(db, "orderHistory")),
-      getDocs(collection(db, "archivedOrders"))
+      getDocs(collection(db, "archivedOrders")),
+      getDocs(collection(db, "stockMovementHistory"))
     ]);
     const rows = new Map();
     const terminal = status => ["completed", "denied"].includes(String(status || "").toLowerCase());
     snapshots.slice().reverse().forEach(snapshot => snapshot.docs.forEach(item => {
+      if (snapshot === snapshots[3]) return;
       const order = {...item.data(), docId:item.id};
       if (order.createdBy !== "STAFF" || !Array.isArray(order.items)) return;
       const key = String(order.recordId || order.docId || order.id);
@@ -4312,6 +4309,40 @@ window.firebaseData = {
       });
       rows.set(key, {...prior, ...order, recordId:key, items:[...items.values()]});
     }));
+    snapshots[3].docs.forEach(item => {
+      const event = item.data();
+      if (event.createdBy !== "STAFF" || !event.orderRecordId || !event.productId) return;
+      const key = String(event.orderRecordId);
+      const prior = rows.get(key);
+      const isReturn = event.movement === "Stock IN";
+      const completedItem = {
+        id:event.productId,
+        name:event.productName || event.productId,
+        category:event.category || "Uncategorized",
+        qty:Number(event.qty || 0),
+        status:"Completed",
+        completedAt:event.completedAt || "",
+        completedAtValue:Number(event.completedAtValue || 0),
+        historyEventId:event.id || item.id
+      };
+      const items = new Map((prior?.items || []).map(entry => [String(entry.id), entry]));
+      const existing = items.get(String(completedItem.id));
+      if (!existing || !["completed", "denied"].includes(String(existing.status || "").toLowerCase())) {
+        items.set(String(completedItem.id), completedItem);
+      }
+      rows.set(key, {
+        ...prior,
+        id:prior?.id || event.orderId || key,
+        recordId:key,
+        createdBy:"STAFF",
+        type:prior?.type || event.type || (isReturn ? "Return" : "Order"),
+        customer:prior?.customer || event.customer || "",
+        date:prior?.date || event.completedAt || "",
+        createdAtValue:Number(prior?.createdAtValue || event.completedAtValue || 0),
+        kind:prior?.kind || (isReturn ? "return" : "order"),
+        items:[...items.values()]
+      });
+    });
     return [...rows.values()];
   },
   seedStaffHistory: async rows => {
@@ -4354,7 +4385,8 @@ window.firebaseData = {
     await setDoc(doc(db, "staffOrderHistory", "_staffHistoryMeta"), {
       createdBy:"STAFF",
       historyClearedAt,
-      historyBackfillV2:true
+      historyBackfillV2:true,
+      historyBackfillV3:true
     }, {merge:true});
     const remaining = await getDocs(collection(db, "staffOrderHistory"));
     return {deleted, remaining:remaining.docs.map(item => ({...item.data(), docId:item.id})).filter(order => Array.isArray(order.items))};
