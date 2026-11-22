@@ -132,6 +132,46 @@ button:disabled {
     width: 100%;
 }
 
+.search-field {
+    position: relative;
+    width: 100%;
+}
+
+.search-field .search {
+    padding-right: 42px;
+}
+
+.search-clear-button {
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 50%;
+    background: #e5eaf2;
+    color: #475569;
+    font-size: 18px;
+    line-height: 1;
+}
+
+.search-clear-button[hidden] {
+    display: none;
+}
+
+.dashboard-card-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.dashboard-card-heading h3 {
+    margin: 0;
+}
+
 .inventory-update-actions {
     display: flex;
     gap: 8px;
@@ -931,7 +971,13 @@ th { background: #f1f5f9; }
 
 <div class="card">
 
-    <h3>Most Ordered Items</h3>
+    <div class="dashboard-card-heading">
+        <h3>Most Ordered Items</h3>
+        <button id="downloadPopularItemsButton" class="green" type="button"
+                style="display:none" onclick="downloadPopularItems()">
+            Download Excel
+        </button>
+    </div>
 
     <p class="small">
         Completed Stock OUT units minus completed Stock IN returns
@@ -996,10 +1042,14 @@ th { background: #f1f5f9; }
 
 <h2>Inventory</h2>
 
-<input class="search"
-       id="inventorySearch"
-       placeholder="Search Product ID, Name or Category..."
-       oninput="inventoryPage=1;renderInventory()">
+<div class="search-field">
+    <input class="search"
+           id="inventorySearch"
+           placeholder="Search Product ID, Name or Category..."
+           oninput="inventoryPage=1;renderInventory();updateSearchClearButton('inventorySearch')">
+    <button class="search-clear-button" type="button" hidden
+            aria-label="Clear inventory search" onclick="clearSearchInput('inventorySearch')">×</button>
+</div>
 
 <div id="adminInventoryTools"
      class="card"
@@ -1073,10 +1123,14 @@ th { background: #f1f5f9; }
 
     <h3>Search Products</h3>
 
-    <input id="orderSearch"
-           class="search"
-           placeholder="Search Product ID, Name or Category..."
-           oninput="searchProducts()">
+    <div class="search-field">
+        <input id="orderSearch"
+               class="search"
+               placeholder="Search Product ID, Name or Category..."
+               oninput="searchProducts();updateSearchClearButton('orderSearch')">
+        <button class="search-clear-button" type="button" hidden
+                aria-label="Clear order product search" onclick="clearSearchInput('orderSearch')">×</button>
+    </div>
 
     <div id="searchResults"></div>
 
@@ -1111,7 +1165,12 @@ th { background: #f1f5f9; }
     </div>
     <div class="card">
         <h3>Search Returned Products</h3>
-        <input id="returnSearch" class="search" placeholder="Search Product ID, Name or Category..." oninput="searchReturnProducts()">
+        <div class="search-field">
+            <input id="returnSearch" class="search" placeholder="Search Product ID, Name or Category..."
+                   oninput="searchReturnProducts();updateSearchClearButton('returnSearch')">
+            <button class="search-clear-button" type="button" hidden
+                    aria-label="Clear return product search" onclick="clearSearchInput('returnSearch')">×</button>
+        </div>
         <div id="returnSearchResults"></div>
         <div class="order-items-panel">
             <div class="order-items-title">Return Items</div>
@@ -1255,6 +1314,7 @@ let stockMovementHistory = [];
 // Legacy archived records remain readable for existing history.
 let archivedOrders = [];
 let cart = [];
+let orderQuantityDrafts = new Map();
 let orderSubmittedAndLocked = false;
 let orderSubmissionInProgress = false;
 let returnSubmittedAndLocked = false;
@@ -1262,6 +1322,7 @@ let returnSubmissionInProgress = false;
 let activeOrderSequence = 1;
 let orderSequenceReady = false;
 let returnCart = [];
+let returnQuantityDrafts = new Map();
 let activity = [];
 
 // Staff history can be cleared independently without deleting Admin records.
@@ -1301,6 +1362,10 @@ function changeRole(assignedRole) {
 
     document.getElementById("adminInventoryTools").style.display =
         role === "admin" ? "block" : "none";
+    const popularDownloadButton = document.getElementById("downloadPopularItemsButton");
+    if (popularDownloadButton) {
+        popularDownloadButton.style.display = role === "admin" ? "" : "none";
+    }
     const clearManagementButton = document.getElementById("clearManagementButton");
     if (clearManagementButton) {
         clearManagementButton.style.display = role === "admin" ? "" : "none";
@@ -1693,6 +1758,43 @@ function toggleCustomer() {
 // PRODUCT SEARCH
 // ======================================
 
+function updateSearchClearButton(inputId) {
+    const input = document.getElementById(inputId);
+    const button = input?.parentElement?.querySelector(".search-clear-button");
+    if (button) button.hidden = !input.value;
+}
+
+
+function clearSearchInput(inputId) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    input.value = "";
+
+    if (inputId === "inventorySearch") {
+        inventoryPage = 1;
+        renderInventory();
+    } else if (inputId === "orderSearch") {
+        orderQuantityDrafts.clear();
+        searchProducts();
+    } else if (inputId === "returnSearch") {
+        returnQuantityDrafts.clear();
+        searchReturnProducts();
+    }
+
+    updateSearchClearButton(inputId);
+    input.focus();
+}
+
+
+function setOrderQuantityDraft(id, value) {
+    orderQuantityDrafts.set(id, String(value));
+}
+
+
+function setReturnQuantityDraft(id, value) {
+    returnQuantityDrafts.set(id, String(value));
+}
+
 function searchProducts() {
 
     let query = document.getElementById("orderSearch")
@@ -1711,7 +1813,12 @@ function searchProducts() {
 
     document.getElementById("searchResults").innerHTML =
 
-        results.map(p => `
+        results.map(p => {
+            const cartItem = cart.find(item => item.id === p.id);
+            const quantityValue = orderQuantityDrafts.has(p.id)
+                ? orderQuantityDrafts.get(p.id)
+                : (cartItem?.qty || 1);
+            return `
 
         <div class="product-result">
 
@@ -1728,7 +1835,8 @@ function searchProducts() {
                     type="number"
                     min="1"
                     max="${p.stock}"
-                    value="${cart.find(item => item.id === p.id)?.qty || 1}"
+                    value="${escapeAttr(quantityValue)}"
+                    oninput="setOrderQuantityDraft('${escapeAttr(p.id)}',this.value)"
                     aria-label="Order quantity for ${escapeAttr(p.name)}"
                     ${p.stock <= 0 ? "disabled" : ""}>
                 <button
@@ -1740,7 +1848,8 @@ function searchProducts() {
 
         </div>
 
-        `).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
+        `;
+        }).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
 
 }
 
@@ -1756,7 +1865,7 @@ function addToCart(id) {
     if (!p) return;
 
     let quantityInput = document.getElementById("orderQty-" + id);
-    let qty = Number(quantityInput ? quantityInput.value : 1);
+    let qty = Number(quantityInput ? quantityInput.value : (orderQuantityDrafts.get(id) || 1));
 
     if (!Number.isInteger(qty) || qty < 1 || qty > p.stock) {
         alert("Enter a valid quantity within available stock.");
@@ -1772,6 +1881,7 @@ function addToCart(id) {
     } else {
         cart.push({...p,qty,note:""});
     }
+    orderQuantityDrafts.delete(id);
 
     if (orderSubmittedAndLocked) orderSubmittedAndLocked = false;
     updateOrderSubmitButton();
@@ -1847,6 +1957,7 @@ function updateQty(i, value) {
     }
 
     cart[i].qty = qty;
+    orderQuantityDrafts.delete(cart[i].id);
     searchProducts();
 
 }
@@ -1859,6 +1970,7 @@ function updateCartNote(index, value) {
 
 function removeCart(i) {
 
+    if (cart[i]) orderQuantityDrafts.delete(cart[i].id);
     cart.splice(i,1);
     renderCart();
     searchProducts();
@@ -1883,7 +1995,12 @@ function searchReturnProducts() {
             String(value || "").toLowerCase().includes(query)
         )
     );
-    document.getElementById("returnSearchResults").innerHTML = results.map(product => `
+    document.getElementById("returnSearchResults").innerHTML = results.map(product => {
+        const cartItem = returnCart.find(item => item.id === product.id);
+        const quantityValue = returnQuantityDrafts.has(product.id)
+            ? returnQuantityDrafts.get(product.id)
+            : (cartItem?.qty || 1);
+        return `
         <div class="product-result">
             <div class="product-result-main">
                 <strong>${escapeHTML(product.name)}</strong>
@@ -1891,19 +2008,21 @@ function searchReturnProducts() {
             </div>
             <div class="product-order-controls">
                 <input id="returnQty-${escapeAttr(product.id)}" type="number" min="1"
-                       value="${returnCart.find(item => item.id === product.id)?.qty || 1}"
+                       value="${escapeAttr(quantityValue)}"
+                       oninput="setReturnQuantityDraft('${escapeAttr(product.id)}',this.value)"
                        aria-label="Return quantity for ${escapeAttr(product.name)}">
                 <button type="button" onclick="addToReturnCart('${escapeAttr(product.id)}')">Add</button>
             </div>
         </div>
-    `).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
+    `;
+    }).join("") || '<div class="small" style="padding:12px 0">No matching products found.</div>';
 }
 
 
 function addToReturnCart(id) {
     const product = products.find(item => item.id === id);
     const quantityInput = document.getElementById("returnQty-" + id);
-    const quantity = Number(quantityInput?.value || 1);
+    const quantity = Number(quantityInput ? quantityInput.value : (returnQuantityDrafts.get(id) || 1));
     if (!product || !Number.isInteger(quantity) || quantity < 1) {
         alert("Enter a whole return quantity greater than zero.");
         return;
@@ -1914,6 +2033,7 @@ function addToReturnCart(id) {
     } else {
         returnCart.push({...product, qty:quantity, note:""});
     }
+    returnQuantityDrafts.delete(id);
     if (returnSubmittedAndLocked) returnSubmittedAndLocked = false;
     renderReturnCart();
     searchReturnProducts();
@@ -1959,6 +2079,7 @@ function updateReturnQty(index, value) {
         return;
     }
     returnCart[index].qty = quantity;
+    returnQuantityDrafts.delete(returnCart[index].id);
     searchReturnProducts();
 }
 
@@ -1969,6 +2090,7 @@ function updateReturnNote(index, value) {
 
 
 function removeReturnCart(index) {
+    if (returnCart[index]) returnQuantityDrafts.delete(returnCart[index].id);
     returnCart.splice(index, 1);
     renderReturnCart();
     searchReturnProducts();
@@ -2040,9 +2162,11 @@ async function submitReturn() {
     returnSubmittedAndLocked = true;
     addActivity("Submitted return " + order.id);
     returnCart = [];
+    returnQuantityDrafts.clear();
     renderReturnCart();
     document.getElementById("returnSearch").value = "";
     document.getElementById("returnSearchResults").innerHTML = "";
+    updateSearchClearButton("returnSearch");
     document.getElementById("returnCustomerName").value = "";
     renderManagement();
     updateDashboard();
@@ -2128,11 +2252,13 @@ async function submitOrder() {
     addActivity("Submitted " + order.id);
 
     cart = [];
+    orderQuantityDrafts.clear();
 
     renderCart();
 
     document.getElementById("orderSearch").value = "";
     document.getElementById("searchResults").innerHTML = "";
+    updateSearchClearButton("orderSearch");
     renderCart();
     updateOrderSubmitButton();
 
@@ -2557,15 +2683,7 @@ function updateDashboard() {
 // COMPLETED STOCK MOVEMENTS, NET OF RETURNS
 // ======================================
 
-function renderPopularItems(resetPage = false) {
-
-    if (resetPage) {
-        popularPage = 1;
-    }
-
-    const category =
-        document.getElementById("dashboardCategory").value;
-
+function getPopularItemResults(category = "All Categories") {
     const netUnitsByProduct = new Map();
     const addNetUnits = (productId, amount) => {
         netUnitsByProduct.set(productId, (netUnitsByProduct.get(productId) || 0) + amount);
@@ -2625,6 +2743,19 @@ function renderPopularItems(resetPage = false) {
         return a.name.localeCompare(b.name);
 
     });
+
+    return results;
+}
+
+
+function renderPopularItems(resetPage = false) {
+
+    if (resetPage) {
+        popularPage = 1;
+    }
+
+    const category = document.getElementById("dashboardCategory").value;
+    const results = getPopularItemResults(category);
 
     // Pagination calculations.
 
@@ -2691,6 +2822,32 @@ function renderPopularItems(resetPage = false) {
 }
 
 
+function downloadPopularItems() {
+    if (role !== "admin") {
+        alert("Only Admin can download Most Ordered Items.");
+        return;
+    }
+    if (!window.XLSX) {
+        alert("The Excel writer did not load. Check your connection and refresh the page.");
+        return;
+    }
+
+    const category = document.getElementById("dashboardCategory").value;
+    const results = getPopularItemResults(category);
+    const rows = [
+        ["Item Name", "Product Code", "Net Units Out"],
+        ...results.map(item => [item.name, item.id, item.count])
+    ];
+    const worksheet = window.XLSX.utils.aoa_to_sheet(rows);
+    const workbook = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(workbook, worksheet, "Most Ordered Items");
+    const categoryPart = category === "All Categories"
+        ? "All_Categories"
+        : category.replace(/[^a-z0-9_-]+/gi, "_");
+    window.XLSX.writeFile(workbook, `Most_Ordered_Items_${categoryPart}.xlsx`);
+}
+
+
 // ======================================
 // NEXT / PREVIOUS PAGE
 // ======================================
@@ -2727,7 +2884,16 @@ function renderStaffOrderHistory() {
 
     // Staff history is independent of Admin/Co-Admin history and stays until
     // Staff uses its own Clear History button.
-    const staffOrders = [...archivedOrders, ...orderHistory, ...orders]
+    // The same pending record can briefly appear in the live list and history
+    // snapshots. Merge by the underlying Firestore record key; later sources
+    // (live orders) replace older copies so each item is shown once.
+    const staffOrdersByRecord = new Map();
+    [...archivedOrders, ...orderHistory, ...orders].forEach(order => {
+        const recordKey = order?.recordId || order?.docId || order?.id;
+        if (recordKey) staffOrdersByRecord.set(recordKey, order);
+    });
+
+    const staffOrders = [...staffOrdersByRecord.values()]
         .filter(order =>
             order.createdBy === "STAFF" &&
             order.createdAtValue &&
