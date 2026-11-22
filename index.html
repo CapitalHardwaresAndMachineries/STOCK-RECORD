@@ -1415,6 +1415,11 @@ let legacyStaffHistoryMigrated = false;
 let historyUnsubscribers = [];
 let historyDataReady = false;
 let historyInitialSnapshots = new Set();
+let historyLoadError = "";
+let historyFallbackTimer = null;
+let popularityTotals = {};
+let popularityTotalsReady = false;
+let popularityMigrationPromise = null;
 let cart = [];
 let orderQuantityDrafts = new Map();
 let orderSubmittedAndLocked = false;
@@ -1996,7 +2001,7 @@ function searchProducts() {
             const waitingForOrders = !window.ordersDataReady;
             const quantityValue = orderQuantityDrafts.has(p.id)
                 ? orderQuantityDrafts.get(p.id)
-                : (cartItem?.qty ?? 0);
+                : (cartItem?.qty ?? "");
             return `
 
         <div class="product-result">
@@ -2015,6 +2020,7 @@ function searchProducts() {
                     min="0"
                     max="${product.stock}"
                     value="${escapeAttr(quantityValue)}"
+                    placeholder="Qty"
                     oninput="setOrderQuantityDraft('${escapeAttr(p.id)}',this.value)"
                     aria-label="Order quantity for ${escapeAttr(p.name)}"
                     ${locked || waitingForOrders || !product.stockReady || product.stock <= 0 ? "disabled" : ""}>
@@ -2218,7 +2224,7 @@ function searchReturnProducts() {
         const waitingForOrders = !window.ordersDataReady;
         const quantityValue = returnQuantityDrafts.has(product.id)
             ? returnQuantityDrafts.get(product.id)
-            : (cartItem?.qty ?? 0);
+            : (cartItem?.qty ?? "");
         return `
         <div class="product-result">
             <div class="product-result-main">
@@ -2226,7 +2232,7 @@ function searchReturnProducts() {
                 <div class="small">${escapeHTML(product.id)} · ${escapeHTML(product.category)} · Current stock: ${currentProduct.stockReady ? currentProduct.stock : "Loading…"}</div>
             </div>
             <div class="product-order-controls">
-                <input id="returnQty-${escapeAttr(product.id)}" type="number" min="0"
+                <input id="returnQty-${escapeAttr(product.id)}" type="number" min="0" placeholder="Qty"
                        value="${escapeAttr(quantityValue)}"
                        oninput="setReturnQuantityDraft('${escapeAttr(product.id)}',this.value)"
                        aria-label="Return quantity for ${escapeAttr(product.name)}"
@@ -2563,6 +2569,8 @@ async function resetAllTestData() {
         stockMovementHistory = [];
         staffOrderHistory = [];
         activeOrderSequence = 1;
+        popularityTotals = {};
+        popularityTotalsReady = true;
         historyPage = 1;
         products.forEach(product => { product.stock = 0; product.stockReady = true; });
         stockCacheTimes.clear();
@@ -2592,10 +2600,9 @@ async function clearOrderManagement() {
         return;
     }
 
-    const recordsToClear = [...orders];
+    const recordsToClear = dedupeOrders(orders);
     const confirmed = confirm(
-        `Clear ${recordsToClear.length} order(s) and return(s) from Order Management?\n\n` +
-        `They will be removed from the management list. Staff, Admin, and Co-Admin history will remain.`
+        `Clear completed, approved, and denied order/return items from Order Management? Pending items will stay and move to the next order ID. Staff, Admin, and Co-Admin history will remain.`
     );
     if (!confirmed) return;
 
@@ -2608,10 +2615,16 @@ async function clearOrderManagement() {
     if (button) button.disabled = true;
     try {
         const result = await window.firebaseData.clearOrdersAndAdvanceSequence(recordsToClear);
-        const movedIds = result.movedIds;
-        const moved = recordsToClear.filter(order => movedIds.includes(orderRecordKey(order)));
-        orderHistory = [...orderHistory.filter(order => !movedIds.includes(orderRecordKey(order))), ...moved];
-        orders = orders.filter(order => !movedIds.includes(orderRecordKey(order)));
+        const clearedIds = new Set(result.clearedOrders.map(orderRecordKey));
+        const cleared = result.clearedOrders;
+        orderHistory = [...orderHistory.filter(order => !clearedIds.has(orderRecordKey(order))), ...cleared];
+        orders = dedupeOrders(result.pendingOrders);
+        result.pendingOrders.forEach(order => {
+            if (order.createdBy === "STAFF") {
+                const staffRecord = staffOrderHistory.find(item => orderRecordKey(item) === orderRecordKey(order));
+                if (staffRecord) staffOrderHistory = upsertOrder(staffOrderHistory, {...staffRecord, id:order.id});
+            }
+        });
         activeOrderSequence = result.nextSequence;
         renderManagement();
         searchProducts();
@@ -2619,14 +2632,14 @@ async function clearOrderManagement() {
         updateDashboard();
         renderOrderHistory();
         renderStaffOrderHistory();
-        alert(`Order Management cleared. The next orders will use ORD-${String(activeOrderSequence).padStart(4,"0")}. Cleared records remain in Order History.`);
+        alert(`Cleared ${cleared.length} order/return record(s). ${orders.length} pending record(s) remain and now use ORD-${String(activeOrderSequence).padStart(4,"0")}. Cleared items remain in Order History.`);
     } catch (error) {
         console.error("Could not clear Order Management:", error);
-        const movedIds = error.movedIds || [];
-        if (movedIds.length) {
-            const moved = recordsToClear.filter(order => movedIds.includes(orderRecordKey(order)));
-            orderHistory = [...orderHistory.filter(order => !movedIds.includes(orderRecordKey(order))), ...moved];
-            orders = orders.filter(order => !movedIds.includes(orderRecordKey(order)));
+        const clearedIds = new Set(error.clearedIds || []);
+        if (clearedIds.size) {
+            const moved = recordsToClear.filter(order => clearedIds.has(orderRecordKey(order)));
+            orderHistory = [...orderHistory.filter(order => !clearedIds.has(orderRecordKey(order))), ...moved];
+            orders = orders.filter(order => !clearedIds.has(orderRecordKey(order)));
             renderManagement();
             searchProducts();
             searchReturnProducts();
@@ -2634,8 +2647,8 @@ async function clearOrderManagement() {
             renderOrderHistory();
             renderStaffOrderHistory();
         }
-        alert(movedIds.length
-            ? `Cleared ${movedIds.length} record(s), but could not finish advancing the order number. History is preserved; check Firestore rules and try again.`
+        alert(clearedIds.size
+            ? `Cleared ${clearedIds.size} record(s), but could not finish the clear. Some pending items may still need refresh. History is preserved; check Firebase and try again.`
             : "Could not clear Order Management. Check Firestore rules and try again.");
     } finally {
         if (button) button.disabled = false;
@@ -2930,6 +2943,8 @@ async function stockOutItem(orderId, productId) {
     }
     const localOrder = orders.find(current => orderRecordKey(current) === orderId);
     if (localOrder) Object.assign(localOrder, completed.order);
+    popularityTotals = completed.netPopularity || popularityTotals;
+    popularityTotalsReady = true;
     stockMovementHistory = [
         completed.historyEvent,
         ...stockMovementHistory.filter(event => event.id !== completed.historyEvent.id)
@@ -2976,6 +2991,8 @@ async function stockInReturn(orderId, productId) {
     }
     const localOrder = orders.find(current => orderRecordKey(current) === orderId);
     if (localOrder) Object.assign(localOrder, completed.order);
+    popularityTotals = completed.netPopularity || popularityTotals;
+    popularityTotalsReady = true;
     const completedItem = completed.order.items.find(current => current.id === productId);
     stockMovementHistory = [
         completed.historyEvent,
@@ -3063,12 +3080,17 @@ function getPopularItemResults(category = "All Categories") {
     const addNetUnits = (productId, amount) => {
         netUnitsByProduct.set(productId, (netUnitsByProduct.get(productId) || 0) + amount);
     };
+    if (popularityTotalsReady) {
+        Object.entries(popularityTotals).forEach(([productId, count]) => {
+            netUnitsByProduct.set(productId, Number(count) || 0);
+        });
+    }
     const recordedEventIds = new Set(stockMovementHistory.map(event => event.id));
     const recordedOrderItems = new Set(stockMovementHistory.map(event =>
         `${event.orderRecordId}:${event.productId}`
     ));
 
-    stockMovementHistory.forEach(event => {
+    if (!popularityTotalsReady) stockMovementHistory.forEach(event => {
         if (event.status !== "Completed") return;
         if (event.movement === "Stock OUT") addNetUnits(event.productId, Number(event.qty || 0));
         if (event.movement === "Stock IN") addNetUnits(event.productId, -Number(event.qty || 0));
@@ -3078,11 +3100,11 @@ function getPopularItemResults(category = "All Categories") {
     [...archivedOrders, ...orderHistory, ...orders].filter(order => Array.isArray(order.items)).forEach(order => {
         allOrders.set(orderRecordKey(order), order);
     });
-    allOrders.forEach(order => {
+    if (!popularityTotalsReady) allOrders.forEach(order => {
         order.items.forEach(item => {
             if (item.status !== "Completed") return;
             const hasMovementEvent = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
-                recordedOrderItems.has(`${orderRecordKey(order)}:${item.id}`);
+                recordedOrderItems.has(`${order.recordId || orderRecordKey(order)}:${item.id}`);
             if (item.historyEventId || hasMovementEvent) return;
             addNetUnits(item.id, order.kind === "return"
                 ? -Number(item.qty || 0)
@@ -3120,6 +3142,24 @@ function getPopularItemResults(category = "All Categories") {
     });
 
     return results;
+}
+
+async function initializePopularityTotalsFromHistory() {
+    if (!["admin", "coadmin"].includes(role) || popularityTotalsReady || popularityMigrationPromise || !historyDataReady || historyLoadError) return;
+    popularityMigrationPromise = (async () => {
+        const totals = Object.fromEntries(
+            getPopularItemResults("All Categories").map(item => [item.id, item.count])
+        );
+        await window.firebaseData.savePopularityTotals(totals);
+        popularityTotals = totals;
+        popularityTotalsReady = true;
+        if (document.getElementById("dashboard")?.classList.contains("active")) updateDashboard();
+    })().catch(error => {
+        console.error("Could not preserve Most Ordered totals:", error);
+    }).finally(() => {
+        popularityMigrationPromise = null;
+    });
+    await popularityMigrationPromise;
 }
 
 
@@ -3426,7 +3466,7 @@ function getAdminOrderHistoryItems() {
     ].filter(order => Array.isArray(order.items)).forEach(order => {
         order.items.forEach(item => {
             const hasImmutableMovement = Boolean(item.historyEventId && recordedEventIds.has(item.historyEventId)) ||
-                recordedOrderItems.has(`${orderRecordKey(order)}:${item.id}`);
+                recordedOrderItems.has(`${order.recordId || orderRecordKey(order)}:${item.id}`);
             if (item.status === "Completed" && item.historyEventId && !recordedEventIds.has(item.historyEventId)) return;
             if (item.status === "Completed" && hasImmutableMovement) return;
             if (item.status !== "Completed" && !order.retainedInHistory) return;
@@ -3467,6 +3507,11 @@ function renderOrderHistory() {
 
     if (!historyDataReady) {
         document.getElementById("activityList").innerHTML = '<div class="empty">Loading order history…</div>';
+        return;
+    }
+
+    if (historyLoadError) {
+        document.getElementById("activityList").innerHTML = `<div class="empty">Order history could not load from Firebase (${escapeHTML(historyLoadError)}). Check the Firestore rules for orderHistory, archivedOrders, and stockMovementHistory, then refresh.</div>`;
         return;
     }
 
@@ -3643,6 +3688,16 @@ async function clearOrderHistory() {
     const button = document.getElementById("clearOrderHistoryButton");
     if (button) button.disabled = true;
     try {
+        if ((!historyDataReady || historyLoadError) && !popularityTotalsReady) {
+            alert("Order history is still loading. Wait for it to finish, then clear history so the Most Ordered totals can be preserved.");
+            return;
+        }
+        const totalsToPreserve = Object.fromEntries(
+            getPopularItemResults("All Categories").map(item => [item.id, item.count])
+        );
+        await window.firebaseData.savePopularityTotals(totalsToPreserve);
+        popularityTotals = totalsToPreserve;
+        popularityTotalsReady = true;
         await ensureStaffHistoryLoaded();
         const result = await window.firebaseData.clearOrderHistory();
         orderHistory = [];
@@ -3726,6 +3781,10 @@ window.stockAppApplyFirebaseData = function(data) {
         adminHistoryClearedAt = Number(data.settings.adminHistoryClearedAt || 0);
         activeOrderSequence = Math.max(1, Number(data.settings.activeOrderSequence || 1));
         legacyStaffHistoryMigrated = Boolean(data.settings.staffHistoryStorageMigrated);
+        if (data.settings.netPopularity && typeof data.settings.netPopularity === "object") {
+            popularityTotals = data.settings.netPopularity;
+            popularityTotalsReady = true;
+        }
     }
     if (data.settingsReady) {
         orderSequenceReady = true;
@@ -3996,9 +4055,11 @@ window.firebaseData = {
   completeStockOut: (orderId, productId) => runTransaction(db, async transaction => {
     const orderRef = doc(db, "orders", orderId);
     const productRef = doc(db, "products", productId);
-    const [orderSnapshot, productSnapshot] = await Promise.all([
+    const settingsRef = doc(db, "appSettings", "history");
+    const [orderSnapshot, productSnapshot, settingsSnapshot] = await Promise.all([
       transaction.get(orderRef),
-      transaction.get(productRef)
+      transaction.get(productRef),
+      transaction.get(settingsRef)
     ]);
     if (!orderSnapshot.exists() || !productSnapshot.exists()) {
       throw new Error("The order or product could not be found.");
@@ -4041,6 +4102,9 @@ window.firebaseData = {
     };
 
     productData.stock = currentStock - quantity;
+    const settingsData = settingsSnapshot.exists() ? settingsSnapshot.data() : {};
+    const netPopularity = {...(settingsData.netPopularity || {})};
+    netPopularity[productId] = Math.max(0, Number(netPopularity[productId] || 0) + quantity);
     item.status = "Completed";
     item.completedAt = completedAt;
     item.completedAtValue = completedAtValue;
@@ -4049,14 +4113,17 @@ window.firebaseData = {
     transaction.set(orderRef, orderData);
     if (orderData.createdBy === "STAFF") transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
-    return {product:productData, order:orderData, historyEvent};
+    transaction.set(settingsRef, {netPopularity}, {merge:true});
+    return {product:productData, order:orderData, historyEvent, netPopularity};
   }),
   completeReturn: (orderId, productId) => runTransaction(db, async transaction => {
     const orderRef = doc(db, "orders", orderId);
     const productRef = doc(db, "products", productId);
-    const [orderSnapshot, productSnapshot] = await Promise.all([
+    const settingsRef = doc(db, "appSettings", "history");
+    const [orderSnapshot, productSnapshot, settingsSnapshot] = await Promise.all([
       transaction.get(orderRef),
-      transaction.get(productRef)
+      transaction.get(productRef),
+      transaction.get(settingsRef)
     ]);
     if (!orderSnapshot.exists() || !productSnapshot.exists()) {
       throw new Error("The return order or product could not be found.");
@@ -4098,6 +4165,9 @@ window.firebaseData = {
     };
 
     productData.stock = Number(productData.stock || 0) + quantity;
+    const settingsData = settingsSnapshot.exists() ? settingsSnapshot.data() : {};
+    const netPopularity = {...(settingsData.netPopularity || {})};
+    netPopularity[productId] = Math.max(0, Number(netPopularity[productId] || 0) - quantity);
     returnItem.status = "Completed";
     returnItem.completedAt = completedAt;
     returnItem.completedAtValue = completedAtValue;
@@ -4106,7 +4176,8 @@ window.firebaseData = {
     transaction.set(orderRef, orderData);
     if (orderData.createdBy === "STAFF") transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
-    return {product:productData, order:orderData, historyEvent};
+    transaction.set(settingsRef, {netPopularity}, {merge:true});
+    return {product:productData, order:orderData, historyEvent, netPopularity};
   }),
   replaceProductInventory: async (productsToSave, onProgress) => {
     const existingSnapshot = await getDocs(collection(db, "products"));
@@ -4185,13 +4256,27 @@ window.firebaseData = {
     await setDoc(doc(db, "appSettings", "history"), {
       activeOrderSequence:1,
       adminHistoryClearedAt:Date.now(),
-      staffHistoryClearedAt:Date.now()
+      staffHistoryClearedAt:Date.now(),
+      netPopularity:{}
     }, {merge:true});
     return {deleted};
   },
   getSettings: async () => {
     const snapshot = await getDoc(doc(db, "appSettings", "history"));
     return snapshot.exists() ? snapshot.data() : {};
+  },
+  getOrderHistoryOnce: async () => {
+    const [ordersSnapshot, archivedSnapshot, movementsSnapshot] = await Promise.all([
+      getDocs(collection(db, "orderHistory")),
+      getDocs(collection(db, "archivedOrders")),
+      getDocs(collection(db, "stockMovementHistory"))
+    ]);
+    const mapRows = snapshot => snapshot.docs.map(item => ({...item.data(), id:item.data().id || item.id, docId:item.id}));
+    return {
+      orderHistory:mapRows(ordersSnapshot),
+      archivedOrders:mapRows(archivedSnapshot),
+      stockMovementHistory:mapRows(movementsSnapshot)
+    };
   },
   getLegacyStaffOrders: async () => {
     const snapshots = await Promise.all([
@@ -4255,34 +4340,52 @@ window.firebaseData = {
     return {deleted};
   },
   clearOrdersAndAdvanceSequence: async ordersToMove => {
-    const movedIds = [];
+    const clearedOrders = [];
+    const pendingOrders = [];
+    const clearRunId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    let nextSequence = 1;
     try {
-      // Keep each batch small so Firestore rules can safely evaluate every write.
+      const settingsRef = doc(db, "appSettings", "history");
+      nextSequence = await runTransaction(db, async transaction => {
+        const snapshot = await transaction.get(settingsRef);
+        const settings = snapshot.exists() ? snapshot.data() : {};
+        const next = Math.max(1, Number(settings.activeOrderSequence || 1)) + 1;
+        transaction.set(settingsRef, {activeOrderSequence:next}, {merge:true});
+        return next;
+      });
       for (let start = 0; start < ordersToMove.length; start += 20) {
         const chunk = ordersToMove.slice(start, start + 20);
         const batch = writeBatch(db);
         chunk.forEach(order => {
           const recordId = order.docId || order.recordId || order.id;
-          batch.set(doc(db, "orderHistory", recordId), order);
-          batch.delete(doc(db, "orders", recordId));
+          const pendingItems = (order.items || []).filter(item => String(item.status || "").toLowerCase() === "pending");
+          const clearedItems = (order.items || []).filter(item => String(item.status || "").toLowerCase() !== "pending");
+          if (clearedItems.length) {
+            const historyId = pendingItems.length ? `${recordId}-CLR-${clearRunId}` : recordId;
+            const historyOrder = {...order, recordId, docId:historyId, items:clearedItems};
+            delete historyOrder.docId;
+            batch.set(doc(db, "orderHistory", historyId), historyOrder);
+            clearedOrders.push({...historyOrder, docId:historyId});
+          }
+          if (pendingItems.length) {
+            const prefix = order.kind === "return" ? "RET" : "ORD";
+            const updatedPending = {...order, id:`${prefix}-${String(nextSequence).padStart(4,"0")}`, items:pendingItems};
+            batch.set(doc(db, "orders", recordId), updatedPending);
+            if (order.createdBy === "STAFF") batch.set(doc(db, "staffOrderHistory", recordId), {...order, id:updatedPending.id});
+            pendingOrders.push({...updatedPending, docId:recordId});
+          } else {
+            batch.delete(doc(db, "orders", recordId));
+          }
         });
         await batch.commit();
-        movedIds.push(...chunk.map(order => order.docId || order.recordId || order.id));
       }
-      const settingsRef = doc(db, "appSettings", "history");
-      const nextSequence = await runTransaction(db, async transaction => {
-        const snapshot = await transaction.get(settingsRef);
-        const settings = snapshot.exists() ? snapshot.data() : {};
-        const next = Math.max(1, Number(settings.activeOrderSequence || 1)) + 1;
-        transaction.set(settingsRef, {activeOrderSequence: next}, {merge: true});
-        return next;
-      });
-      return {movedIds, nextSequence};
+      return {clearedOrders, pendingOrders, nextSequence};
     } catch (error) {
-      error.movedIds = movedIds;
+      error.clearedIds = clearedOrders.map(order => order.docId || order.recordId || order.id);
       throw error;
     }
   },
+  savePopularityTotals: totals => setDoc(doc(db, "appSettings", "history"), {netPopularity:totals}, {merge:true}),
   setSettings: settings => setDoc(doc(db, "appSettings", "history"), settings, {merge: true})
 };
 
@@ -4322,13 +4425,37 @@ function stopHistoryListeners() {
   historyUnsubscribers = [];
   historyInitialSnapshots = new Set();
   historyDataReady = false;
+  historyLoadError = "";
+  if (historyFallbackTimer) clearTimeout(historyFallbackTimer);
+  historyFallbackTimer = null;
 }
 
 function startHistoryListeners() {
   if (historyUnsubscribers.length || !window.firebaseData) return;
+  historyLoadError = "";
   const targets = ["orderHistory", "archivedOrders", "stockMovementHistory"];
+  historyFallbackTimer = window.setTimeout(async () => {
+    if (historyDataReady) return;
+    try {
+      const historyData = await window.firebaseData.getOrderHistoryOnce();
+      orderHistory = historyData.orderHistory;
+      archivedOrders = historyData.archivedOrders;
+      stockMovementHistory = historyData.stockMovementHistory;
+      historyInitialSnapshots = new Set(targets);
+      historyDataReady = true;
+      historyLoadError = "";
+      initializePopularityTotalsFromHistory();
+      if (document.getElementById("history")?.classList.contains("active")) renderOrderHistory();
+      if (document.getElementById("dashboard")?.classList.contains("active")) updateDashboard();
+    } catch (error) {
+      historyLoadError = error.code || error.message || "initial read timed out";
+      historyDataReady = true;
+      if (document.getElementById("history")?.classList.contains("active")) renderOrderHistory();
+    }
+  }, 10000);
   targets.forEach(name => {
     historyUnsubscribers.push(onSnapshot(collection(db, name), snapshot => {
+      if (historyLoadError.startsWith(`${name}:`)) historyLoadError = "";
       historyInitialSnapshots.add(name);
       const rows = snapshot.docs.map(item => ({...item.data(), id:item.data().id || item.id, docId:item.id}));
       if (name === "orderHistory") orderHistory = rows;
@@ -4336,13 +4463,23 @@ function startHistoryListeners() {
       if (name === "stockMovementHistory") stockMovementHistory = rows;
       historyDataReady = targets.every(target => historyInitialSnapshots.has(target));
       if (historyDataReady) {
+        if (historyFallbackTimer) clearTimeout(historyFallbackTimer);
+        historyFallbackTimer = null;
+        initializePopularityTotalsFromHistory();
         if (document.getElementById("history")?.classList.contains("active")) renderOrderHistory();
         if (document.getElementById("dashboard")?.classList.contains("active")) updateDashboard();
       }
     }, error => {
       console.error(`Could not load ${name}:`, error);
+      historyLoadError = `${name}: ${error.code || error.message || "read failed"}`;
+      historyInitialSnapshots.add(name);
+      historyDataReady = targets.every(target => historyInitialSnapshots.has(target));
+      if (historyDataReady && historyFallbackTimer) {
+        clearTimeout(historyFallbackTimer);
+        historyFallbackTimer = null;
+      }
       if (document.getElementById("history")?.classList.contains("active")) {
-        document.getElementById("activityList").innerHTML = '<div class="empty">Could not load history. Check Firestore rules and try again.</div>';
+        if (historyDataReady) renderOrderHistory();
       }
     }));
   });
