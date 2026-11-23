@@ -2624,7 +2624,7 @@ async function clearOrderManagement() {
         orderHistory = [...orderHistory.filter(order => !clearedIds.has(orderRecordKey(order))), ...cleared];
         orders = dedupeOrders(result.pendingOrders);
         result.pendingOrders.forEach(order => {
-            if (order.createdBy === "STAFF") {
+            if (isStaffOrder(order)) {
                 const staffRecord = staffOrderHistory.find(item => orderRecordKey(item) === orderRecordKey(order));
                 if (staffRecord) staffOrderHistory = upsertOrder(staffOrderHistory, {...staffRecord, id:order.id});
             }
@@ -2665,6 +2665,12 @@ function renderManagement() {
 
     let container = document.getElementById("orderList");
     const canEditQuantities = role === "admin" || role === "coadmin";
+    const savedHorizontalPositions = new Map(
+        [...container.querySelectorAll(".table-wrap[data-category-key]")].map(table => [
+            table.dataset.categoryKey,
+            {left:table.scrollLeft, top:table.scrollTop}
+        ])
+    );
     orders = dedupeOrders(orders);
 
     if (orders.length === 0) {
@@ -2745,7 +2751,7 @@ function renderManagement() {
         return `
             <div class="category-box">
                 <h3>Category: ${escapeHTML(categoryGroup.label)}</h3>
-                <div class="table-wrap"><table>
+                <div class="table-wrap" data-category-key="${escapeAttr(categoryGroup.key)}"><table>
                     <thead><tr>
                         <th>Order ID</th><th>Type</th><th>Submitted By / Date</th><th>Product ID</th><th>Product</th>
                         <th>Current Stock</th>
@@ -2756,6 +2762,14 @@ function renderManagement() {
             </div>
         `;
     }).join("");
+    window.requestAnimationFrame(() => {
+        container.querySelectorAll(".table-wrap[data-category-key]").forEach(table => {
+            const position = savedHorizontalPositions.get(table.dataset.categoryKey);
+            if (!position) return;
+            table.scrollLeft = position.left;
+            table.scrollTop = position.top;
+        });
+    });
 }
 
 
@@ -3231,6 +3245,10 @@ function addActivity(message) {
 }
 
 
+function isStaffOrder(order) {
+    return String(order?.createdBy || "").trim().toLowerCase() === "staff";
+}
+
 function mergeStaffHistoryRecords(...recordGroups) {
     const merged = new Map();
     const isTerminal = status => ["completed", "denied"].includes(String(status || "").toLowerCase());
@@ -3319,7 +3337,7 @@ function renderStaffOrderHistory() {
     });
     // Active pending or approved items remain visible until they are completed
     // or denied. Cleared terminal items cannot reappear from Order Management.
-    orders.filter(order => order.createdBy === "STAFF").forEach(order => {
+        orders.filter(isStaffOrder).forEach(order => {
         const key = order?.recordId || order?.docId || order?.id;
         if (!key) return;
         const activeItems = (order.items || []).filter(item => !["completed", "denied"].includes(String(item.status || "").toLowerCase()));
@@ -3330,7 +3348,7 @@ function renderStaffOrderHistory() {
         staffOrdersByRecord.set(key, {...prior, items:[...mergedItems.values()]});
     });
     const staffOrders = [...staffOrdersByRecord.values()]
-        .filter(order => order.createdBy === "STAFF")
+        .filter(isStaffOrder)
         .sort((a, b) => Number(b.createdAtValue || 0) - Number(a.createdAtValue || 0));
 
     const rows = [];
@@ -3510,7 +3528,6 @@ function renderOrderHistory() {
                 <thead>
                     <tr>
                         <th>Date</th>
-                        <th>Movement</th>
                         <th>Order ID</th>
                         <th>Product ID</th>
                         <th>Product Name</th>
@@ -3525,7 +3542,6 @@ function renderOrderHistory() {
                     ${visibleItems.map(item => `
                         <tr>
                             <td>${escapeHTML(formatDateTime12h(item.completedAtValue || item.completedAt))}</td>
-                            <td>${escapeHTML(item.movement)}</td>
                             <td>${escapeHTML(item.orderId)}</td>
                             <td>${escapeHTML(item.productId)}</td>
                             <td>${escapeHTML(item.productName)}</td>
@@ -3604,7 +3620,6 @@ function downloadOrderHistoryExcel() {
 
     const headers = [
         "Date",
-        "Movement",
         "Order ID",
         "Product ID",
         "Product Name",
@@ -3618,7 +3633,6 @@ function downloadOrderHistoryExcel() {
     const tableRows = historyItems.map(item => `
         <tr>
             <td>${escapeHTML(formatDateTime12h(item.completedAtValue || item.completedAt))}</td>
-            <td>${escapeHTML(item.movement)}</td>
             <td>${escapeHTML(item.orderId)}</td>
             <td>${escapeHTML(item.productId)}</td>
             <td>${escapeHTML(item.productName)}</td>
@@ -4115,7 +4129,7 @@ window.firebaseData = {
     item.historyEventId = eventId;
     transaction.set(productRef, productData);
     transaction.set(orderRef, orderData);
-    if (orderData.createdBy === "STAFF") transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
+    if (isStaffOrder(orderData)) transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
     transaction.set(settingsRef, {netPopularity}, {merge:true});
     return {product:productData, order:orderData, historyEvent, netPopularity};
@@ -4178,7 +4192,7 @@ window.firebaseData = {
     returnItem.historyEventId = eventId;
     transaction.set(productRef, productData);
     transaction.set(orderRef, orderData);
-    if (orderData.createdBy === "STAFF") transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
+    if (isStaffOrder(orderData)) transaction.set(doc(db, "staffOrderHistory", orderId), orderData);
     transaction.set(doc(db, "stockMovementHistory", eventId), historyEvent);
     transaction.set(settingsRef, {netPopularity}, {merge:true});
     return {product:productData, order:orderData, historyEvent, netPopularity};
@@ -4219,7 +4233,7 @@ window.firebaseData = {
     const recordId = order.recordId || order.docId || order.id;
     const batch = writeBatch(db);
     batch.set(doc(db, "orders", recordId), order);
-    if (order.createdBy === "STAFF") batch.set(doc(db, "staffOrderHistory", recordId), order);
+    if (isStaffOrder(order)) batch.set(doc(db, "staffOrderHistory", recordId), order);
     await batch.commit();
   },
   recordOrderDecision: async (order, item, status, decisionAtValue) => {
@@ -4294,7 +4308,7 @@ window.firebaseData = {
     snapshots.slice().reverse().forEach(snapshot => snapshot.docs.forEach(item => {
       if (snapshot === snapshots[3]) return;
       const order = {...item.data(), docId:item.id};
-      if (order.createdBy !== "STAFF" || !Array.isArray(order.items)) return;
+      if (!isStaffOrder(order) || !Array.isArray(order.items)) return;
       const key = String(order.recordId || order.docId || order.id);
       const prior = rows.get(key);
       const items = new Map((prior?.items || []).map(entry => [String(entry.id), entry]));
@@ -4311,7 +4325,7 @@ window.firebaseData = {
     }));
     snapshots[3].docs.forEach(item => {
       const event = item.data();
-      if (event.createdBy !== "STAFF" || !event.orderRecordId || !event.productId) return;
+      if (String(event.createdBy || "").trim().toLowerCase() !== "staff" || !event.orderRecordId || !event.productId) return;
       const key = String(event.orderRecordId);
       const prior = rows.get(key);
       const isReturn = event.movement === "Stock IN";
@@ -4437,7 +4451,7 @@ window.firebaseData = {
             const prefix = order.kind === "return" ? "RET" : "ORD";
             const updatedPending = {...order, id:`${prefix}-${String(nextSequence).padStart(4,"0")}`, items:pendingItems};
             batch.set(doc(db, "orders", recordId), updatedPending);
-            if (order.createdBy === "STAFF") batch.set(doc(db, "staffOrderHistory", recordId), {...order, id:updatedPending.id});
+            if (isStaffOrder(order)) batch.set(doc(db, "staffOrderHistory", recordId), {...order, id:updatedPending.id});
             pendingOrders.push({...updatedPending, docId:recordId});
           } else {
             batch.delete(doc(db, "orders", recordId));
