@@ -193,6 +193,23 @@ button:disabled {
     min-width: 110px;
 }
 
+.requirement-filters {
+    display: flex;
+    align-items: end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.requirement-filters label {
+    display: grid;
+    gap: 5px;
+    font-weight: 600;
+}
+
+.requirement-filters select { min-width: 190px; }
+.requirement-filters input { width: 150px; }
+.requirement-threshold-field { width: 150px; }
+
 table {
     width: 100%;
     border-collapse: collapse;
@@ -610,6 +627,19 @@ th { background: #f1f5f9; }
         padding: 12px;
     }
 
+    .requirement-filters {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .requirement-filters select,
+    .requirement-filters input,
+    .requirement-filters button {
+        width: 100%;
+    }
+
+    .requirement-threshold-field { width: 100%; }
+
     .product-result {
         align-items: center;
         flex-wrap: wrap;
@@ -967,6 +997,10 @@ th { background: #f1f5f9; }
         📦 Inventory
     </button>
 
+    <button data-admin-only="true" onclick="showPage('requirements',this)">
+        ⚠️ Requirements
+    </button>
+
     <button onclick="showPage('order',this)">
         📝 Order
     </button>
@@ -1135,6 +1169,48 @@ th { background: #f1f5f9; }
     <button id="inventoryPreviousPage" onclick="changeInventoryPage(-1)">Previous</button>
     <span id="inventoryPageInfo" class="page-info" aria-live="polite"></span>
     <button id="inventoryNextPage" onclick="changeInventoryPage(1)">Next</button>
+</div>
+
+</section>
+
+
+<!-- ADMIN REQUIREMENTS -->
+
+<section id="requirements" class="page">
+
+<h2>Requirements</h2>
+<p class="small">Find products in a category whose live Firebase stock is below the amount you enter. Results load 20 items at a time.</p>
+
+<div class="card requirement-filters">
+    <label for="requirementCategory">Category</label>
+    <select id="requirementCategory" onchange="updateRequirementClearButton()">
+        <option value="All Categories">All Categories</option>
+    </select>
+    <label for="requirementThreshold">Show stock below</label>
+    <div class="search-field requirement-threshold-field">
+        <input id="requirementThreshold" type="number" min="1" step="1" inputmode="numeric" placeholder="Enter quantity" oninput="updateRequirementClearButton()">
+        <button id="requirementClearButton" class="search-clear-button" type="button" hidden aria-label="Clear and reset requirement search" onclick="clearRequirementSearch()">×</button>
+    </div>
+    <button id="requirementSearchButton" class="green" type="button" onclick="searchRequirements()">Search</button>
+</div>
+<p class="small">Firebase may request a one-time index the first time you search within a category. Follow Firebase’s Create Index prompt if it appears.</p>
+
+<div class="card">
+    <div class="dashboard-card-heading">
+        <div id="requirementStatus" class="small" role="status" aria-live="polite">Choose a category and stock level, then press Search.</div>
+        <button id="downloadRequirementPageButton" class="green" type="button" onclick="downloadRequirementPage()" disabled>Download This Page</button>
+    </div>
+    <div class="table-wrap" style="margin-top:10px">
+        <table>
+            <thead><tr><th>Product ID</th><th>Product Name</th><th>Category</th><th>Live Quantity</th></tr></thead>
+            <tbody id="requirementBody"><tr><td colspan="4">No search yet.</td></tr></tbody>
+        </table>
+    </div>
+    <div class="pagination" aria-label="Requirement result pages">
+        <button id="requirementPrevious" type="button" onclick="changeRequirementPage(-1)" disabled>Previous</button>
+        <span id="requirementPageInfo" class="page-info">Page 1</span>
+        <button id="requirementNext" type="button" onclick="changeRequirementPage(1)" disabled>Next</button>
+    </div>
 </div>
 
 </section>
@@ -1454,6 +1530,11 @@ const ITEMS_PER_PAGE = 10;
 let popularPage = 1;
 const INVENTORY_ITEMS_PER_PAGE = 30;
 let inventoryPage = 1;
+const REQUIREMENT_ITEMS_PER_PAGE = 20;
+let requirementPages = [];
+let requirementPageIndex = 0;
+let requirementSearchToken = 0;
+let requirementSearchBusy = false;
 
 // ORDER HISTORY PAGINATION
 const HISTORY_ITEMS_PER_PAGE = 50;
@@ -1474,6 +1555,9 @@ function changeRole(assignedRole) {
     if (popularDownloadButton) {
         popularDownloadButton.style.display = role === "admin" ? "" : "none";
     }
+    document.querySelectorAll('[data-admin-only="true"]').forEach(element => {
+        element.style.display = role === "admin" ? "" : "none";
+    });
     const clearManagementButton = document.getElementById("clearManagementButton");
     if (clearManagementButton) {
         clearManagementButton.style.display = role === "admin" ? "" : "none";
@@ -1516,6 +1600,10 @@ function changeRole(assignedRole) {
             btn.style.display = "none";
         }
 
+        if (btn.dataset.adminOnly === "true" && role !== "admin") {
+            btn.style.display = "none";
+        }
+
     });
 
     showPage("dashboard",
@@ -1549,6 +1637,11 @@ function showPage(id, button) {
         return;
     }
 
+    if (id === "requirements" && role !== "admin") {
+        alert("Only Admin can access Requirements.");
+        return;
+    }
+
     document.querySelectorAll(".page").forEach(p =>
         p.classList.remove("active")
     );
@@ -1562,6 +1655,7 @@ function showPage(id, button) {
     if (button) button.classList.add("active");
 
     if (id === "inventory") renderInventory();
+    if (id === "requirements") updateRequirementClearButton();
     if (id === "management") renderManagement();
     if (id === "history") {
         renderOrderHistory();
@@ -1688,6 +1782,169 @@ async function renderInventory(forceStockRefresh = false) {
 function changeInventoryPage(direction) {
     inventoryPage += direction;
     renderInventory(true);
+}
+
+
+// ======================================
+// ADMIN LOW-STOCK REQUIREMENTS
+// ======================================
+
+function initializeRequirementCategories() {
+    const select = document.getElementById("requirementCategory");
+    if (!select) return;
+    const categories = [...new Set(catalogProducts.map(product => String(product.category || "").trim()).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b));
+    select.innerHTML = '<option value="All Categories">All Categories</option>' +
+        categories.map(category => `<option value="${escapeAttr(category)}">${escapeHTML(category)}</option>`).join("");
+}
+window.stockAppInitializeRequirementCategories = initializeRequirementCategories;
+
+function updateRequirementClearButton() {
+    const button = document.getElementById("requirementClearButton");
+    if (!button) return;
+    const category = document.getElementById("requirementCategory")?.value || "All Categories";
+    const threshold = document.getElementById("requirementThreshold")?.value || "";
+    button.hidden = category === "All Categories" && !threshold;
+}
+
+function clearRequirementSearch() {
+    document.getElementById("requirementCategory").value = "All Categories";
+    document.getElementById("requirementThreshold").value = "";
+    requirementPages = [];
+    requirementPageIndex = 0;
+    requirementSearchToken++;
+    requirementSearchBusy = false;
+    document.getElementById("requirementSearchButton").disabled = false;
+    document.getElementById("requirementBody").innerHTML = '<tr><td colspan="4">No search yet.</td></tr>';
+    document.getElementById("requirementStatus").textContent = "Choose a category and stock level, then press Search.";
+    document.getElementById("requirementPageInfo").textContent = "Page 1";
+    document.getElementById("requirementPrevious").disabled = true;
+    document.getElementById("requirementNext").disabled = true;
+    document.getElementById("downloadRequirementPageButton").disabled = true;
+    updateRequirementClearButton();
+}
+
+function renderRequirementPage(pageIndex) {
+    const page = requirementPages[pageIndex];
+    if (!page) return;
+    requirementPageIndex = pageIndex;
+    document.getElementById("requirementBody").innerHTML = page.rows.map(product => `
+        <tr>
+            <td>${escapeHTML(product.id)}</td>
+            <td class="important-product-name">${escapeHTML(product.name)}</td>
+            <td>${escapeHTML(product.category)}</td>
+            <td class="important-stock-value">${Number(product.stock) || 0}</td>
+        </tr>
+    `).join("") || '<tr><td colspan="4">No matching products found.</td></tr>';
+    document.getElementById("requirementStatus").textContent = page.rows.length
+        ? `${page.rows.length} matching product${page.rows.length === 1 ? "" : "s"} on this page. ${page.hasMore ? "More results may be available." : "No more results."}`
+        : "No products match this category and stock level.";
+    document.getElementById("requirementPageInfo").textContent = `Page ${pageIndex + 1}`;
+    document.getElementById("requirementPrevious").disabled = pageIndex === 0;
+    document.getElementById("requirementNext").disabled = !page.hasMore;
+    document.getElementById("downloadRequirementPageButton").disabled = page.rows.length === 0;
+}
+
+async function loadRequirementPage(pageIndex) {
+    if (role !== "admin" || requirementSearchBusy) return;
+    if (pageIndex < requirementPages.length) {
+        renderRequirementPage(pageIndex);
+        return;
+    }
+    const search = requirementPages.search;
+    if (!search) return;
+    const cursor = pageIndex > 0 ? requirementPages[pageIndex - 1]?.cursor : null;
+    if (pageIndex > 0 && !cursor) return;
+
+    const token = ++requirementSearchToken;
+    requirementSearchBusy = true;
+    document.getElementById("requirementStatus").textContent = "Loading the next 20 matching products…";
+    document.getElementById("requirementPrevious").disabled = true;
+    document.getElementById("requirementNext").disabled = true;
+    document.getElementById("downloadRequirementPageButton").disabled = true;
+    document.getElementById("requirementSearchButton").disabled = true;
+    try {
+        const result = await window.firebaseData.getRequirementPage(
+            search.category,
+            search.threshold,
+            REQUIREMENT_ITEMS_PER_PAGE,
+            cursor
+        );
+        if (token !== requirementSearchToken) return;
+        const catalogById = new Map(catalogProducts.map(product => [String(product.id), product]));
+        const rows = result.rows.map(row => {
+            const catalog = catalogById.get(String(row.id));
+            return {...row, name:catalog?.name || row.name || row.id, category:catalog?.category || row.category || "Uncategorized"};
+        });
+        requirementPages[pageIndex] = {rows, cursor:result.cursor, hasMore:result.hasMore};
+        renderRequirementPage(pageIndex);
+        if (!rows.length && pageIndex > 0) {
+            requirementPages[pageIndex - 1].hasMore = false;
+            renderRequirementPage(pageIndex - 1);
+        }
+    } catch (error) {
+        console.error("Could not load low-stock requirements:", error);
+        if (token === requirementSearchToken) {
+            const indexHint = error.code === "failed-precondition"
+                ? " Firebase may need a composite index for category and stock; open the error details in the browser console to create it."
+                : " Check your connection and Firestore access.";
+            document.getElementById("requirementStatus").textContent = `Could not load requirements.${indexHint}`;
+            document.getElementById("requirementPrevious").disabled = pageIndex <= 0;
+            document.getElementById("requirementNext").disabled = true;
+        }
+    } finally {
+        if (token === requirementSearchToken) {
+            requirementSearchBusy = false;
+            document.getElementById("requirementSearchButton").disabled = false;
+        }
+    }
+}
+
+function searchRequirements() {
+    if (role !== "admin") return alert("Only Admin can access Requirements.");
+    if (requirementSearchBusy) return;
+    const rawThreshold = document.getElementById("requirementThreshold").value.trim();
+    const threshold = Number(rawThreshold);
+    if (!rawThreshold || !Number.isSafeInteger(threshold) || threshold < 1) {
+        document.getElementById("requirementStatus").textContent = "Enter a whole number greater than zero for the stock limit.";
+        document.getElementById("requirementThreshold").focus();
+        return;
+    }
+    if (!window.productDataReady || !window.firebaseData?.getRequirementPage) {
+        document.getElementById("requirementStatus").textContent = "Firebase inventory is still loading. Wait a moment and search again.";
+        return;
+    }
+    requirementPages = [];
+    requirementPages.search = {
+        category:document.getElementById("requirementCategory").value,
+        threshold
+    };
+    requirementPageIndex = 0;
+    loadRequirementPage(0);
+}
+
+function changeRequirementPage(direction) {
+    const nextPage = requirementPageIndex + direction;
+    if (nextPage < 0) return;
+    loadRequirementPage(nextPage);
+}
+
+function downloadRequirementPage() {
+    if (role !== "admin") return alert("Only Admin can download Requirement results.");
+    const page = requirementPages[requirementPageIndex];
+    if (!page?.rows.length) return;
+    if (!window.XLSX) return alert("Excel download is not ready. Check your connection and try again.");
+    const rows = [
+        ["Product ID", "Product Name", "Category", "Live Quantity"],
+        ...page.rows.map(product => [product.id, product.name, product.category, Number(product.stock) || 0])
+    ];
+    const workbook = window.XLSX.utils.book_new();
+    const worksheet = window.XLSX.utils.aoa_to_sheet(rows);
+    window.XLSX.utils.book_append_sheet(workbook, worksheet, "Requirements");
+    const category = requirementPages.search?.category || "All_Categories";
+    const threshold = requirementPages.search?.threshold || "stock";
+    const safeCategory = String(category).replace(/[^a-z0-9_-]+/gi, "_");
+    window.XLSX.writeFile(workbook, `Requirements_Below_${threshold}_${safeCategory}_Page_${requirementPageIndex + 1}.xlsx`);
 }
 
 
@@ -3915,7 +4172,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/13.3.0/firebas
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js";
 import {
   getFirestore, collection, doc, getDoc, getDocs, onSnapshot, runTransaction, setDoc, writeBatch,
-  query, where, documentId, getAggregateFromServer, count, sum
+  query, where, documentId, getAggregateFromServer, count, sum, orderBy, startAfter, limit
 } from "https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -4058,6 +4315,20 @@ window.firebaseData = {
       chunk.forEach(id => rows.push(found.get(id) || {id, stock:0, stockReady:true}));
     }
     return rows;
+  },
+  getRequirementPage: async (category, threshold, pageSize, cursor = null) => {
+    const constraints = [where("stock", "<", Number(threshold))];
+    if (category !== "All Categories") constraints.push(where("category", "==", category));
+    constraints.push(orderBy("stock", "asc"));
+    if (cursor) constraints.push(startAfter(cursor));
+    constraints.push(limit(pageSize));
+    const snapshot = await getDocs(query(collection(db, "products"), ...constraints));
+    const lastDocument = snapshot.docs[snapshot.docs.length - 1] || null;
+    return {
+      rows:snapshot.docs.map(item => ({...item.data(), id:item.id, stockReady:true})),
+      cursor:lastDocument,
+      hasMore:snapshot.size === pageSize
+    };
   },
   getAllProductStocks: async () => {
     const snapshot = await getDocs(collection(db, "products"));
@@ -4600,6 +4871,7 @@ async function startWorkspace(user, role) {
     catalogIds.add(id);
     return {id,name,category};
   });
+  window.stockAppInitializeRequirementCategories();
   products = catalogProducts.map(item => ({...item,stock:0,stockReady:false}));
   stockCacheTimes.clear();
   window.productDataReady = true;
