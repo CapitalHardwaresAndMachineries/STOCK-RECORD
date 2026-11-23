@@ -731,13 +731,11 @@ th { background: #f1f5f9; }
 .login-brand{display:flex;align-items:center;gap:12px;margin-bottom:27px}
 .login-brand-icon{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:#dbeafe;font-size:25px}
 .login-brand-name{font-weight:800;color:#172554;font-size:17px}.login-brand-caption{color:#64748b;font-size:12px;margin-top:3px}
-.login-shell h1{color:#172554;font-size:26px;margin:0 0 8px}.login-intro{color:#64748b;font-size:14px;margin:0 0 24px;line-height:1.5}
+.login-shell h1{color:#172554;font-size:26px;margin:0 0 8px}
 .login-field{display:block;margin:15px 0 7px;color:#334155;font-size:13px;font-weight:700}
 .login-input{width:100%;max-width:none;padding:13px 14px;border:1px solid #cbd5e1;border-radius:8px;outline:none;background:#fff}
 .login-input:focus{border-color:#2563eb;box-shadow:0 0 0 3px #2563eb20}
 .login-submit{width:100%;margin-top:22px;padding:14px;border-radius:8px;font-weight:700}
-.login-footnote{color:#94a3b8;font-size:11px;text-align:center;line-height:1.5;margin-top:18px}
-.login-preview{width:100%;margin-top:10px;padding:11px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:8px}
 @media(max-width:480px){.login-shell{padding:25px 21px}.login-shell h1{font-size:23px}}
 
 
@@ -961,7 +959,6 @@ th { background: #f1f5f9; }
       <div><div class="login-brand-name">STOCK MANAGEMENT</div><div class="login-brand-caption">Business inventory workspace</div></div>
     </div>
     <h1>Welcome back</h1>
-    <p class="login-intro">Sign in with your employee account to continue to your workspace.</p>
     <form id="loginDesignForm">
       <label class="login-field" for="loginEmail">Email address</label>
       <input class="login-input" id="loginEmail" type="email" placeholder="Enter your email address" autocomplete="username">
@@ -970,7 +967,6 @@ th { background: #f1f5f9; }
       <button class="login-submit" type="submit">Sign in</button>
     </form>
     <div id="loginMessage" class="small" role="status" aria-live="polite" style="color:#b91c1c;min-height:20px;margin-top:12px"></div>
-    <div class="login-footnote">Sign in with an account created in Firebase Authentication.</div>
   </div>
 </div>
 
@@ -1064,10 +1060,6 @@ th { background: #f1f5f9; }
         </button>
     </div>
 
-    <p class="small">
-        Completed Stock OUT units minus completed Stock IN returns
-    </p>
-
     <label>Select Category</label>
 
     <select id="dashboardCategory"
@@ -1141,7 +1133,6 @@ th { background: #f1f5f9; }
      style="display:none">
 
     <h3>Update Inventory from Excel</h3>
-    <p class="small">Download gets live quantities from Firebase. Update replaces Firebase stock for the same products. Product IDs, names, and categories must match the GitHub catalogue; edit product_catalog.json on GitHub separately when adding, removing, or renaming products.</p>
     <input id="productImportFile" type="file" accept=".xlsx,.xls" aria-label="Choose Excel stock file" onchange="showSelectedInventoryFile()">
     <div class="inventory-update-actions">
         <button id="updateInventoryButton" class="yellow" type="button" onclick="updateInventoryFromFile()">Update</button>
@@ -1179,7 +1170,6 @@ th { background: #f1f5f9; }
 <section id="requirements" class="page">
 
 <h2>Requirements</h2>
-<p class="small">Find products in a category whose live Firebase stock is below the amount you enter. Results load 20 items at a time.</p>
 
 <div class="card requirement-filters">
     <label for="requirementCategory">Category</label>
@@ -1193,11 +1183,10 @@ th { background: #f1f5f9; }
     </div>
     <button id="requirementSearchButton" class="green" type="button" onclick="searchRequirements()">Search</button>
 </div>
-<p class="small">Firebase may request a one-time index the first time you search within a category. Follow Firebase’s Create Index prompt if it appears.</p>
 
 <div class="card">
     <div class="dashboard-card-heading">
-        <div id="requirementStatus" class="small" role="status" aria-live="polite">Choose a category and stock level, then press Search.</div>
+        <div id="requirementStatus" class="small" role="status" aria-live="polite">No results yet.</div>
         <button id="downloadRequirementPageButton" class="green" type="button" onclick="downloadRequirementPage()" disabled>Download This Page</button>
     </div>
     <div class="table-wrap" style="margin-top:10px">
@@ -1316,7 +1305,6 @@ th { background: #f1f5f9; }
 <div class="management-heading">
     <div>
         <h2>Order Management</h2>
-        <p class="small">Orders and returns stay here until an Admin or Co-Admin clears them. Cleared records remain in Order History.</p>
     </div>
     <button id="clearManagementButton" class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
     <button id="resetTestDataButton" class="red" onclick="resetAllTestData()" style="display:none">Reset All Test Data</button>
@@ -1343,10 +1331,6 @@ th { background: #f1f5f9; }
 
     <p>STAFF – Inventory viewing and order creation</p>
 
-    <p class="small">
-        Login and stock data use Firebase. Create employee accounts in Firebase Authentication,
-        then assign each account a role in Firestore at users/{UID}.
-    </p>
 
 </div>
 
@@ -1360,7 +1344,6 @@ th { background: #f1f5f9; }
 <div class="history-heading">
     <div>
         <h2>Order History</h2>
-        <p class="small">Completed stock movements and orders cleared by Admin. Clearing this history also clears it for Co-Admin; Staff history is separate.</p>
     </div>
     <div class="history-actions">
         <button id="downloadOrderHistoryButton" class="green" onclick="downloadOrderHistoryExcel()">Download Excel</button>
@@ -1395,7 +1378,6 @@ th { background: #f1f5f9; }
     <div class="staff-history-heading">
         <div>
             <h2>My Order History</h2>
-            <p class="small">Your order history stays here until you clear it.</p>
         </div>
         <button class="red" onclick="clearStaffOrderHistory()">Clear History</button>
     </div>
@@ -1432,15 +1414,6 @@ window.productDataReady = false;
 window.ordersDataReady = false;
 let productUpdateBusy = false;
 let managementStockLoadInProgress = false;
-
-function mergeCatalogWithStock() {
-    const stockById = new Map(products.map(product => [String(product.id), product]));
-    products = catalogProducts.map(item => {
-        const stockProduct = stockById.get(String(item.id));
-        return {...item, stock:stockProduct ? Number(stockProduct.stock) || 0 : 0,
-            stockReady:Boolean(stockProduct && stockProduct.stockReady)};
-    });
-}
 
 function updateCachedStock(rows) {
     const receivedAt = Date.now();
@@ -1816,7 +1789,7 @@ function clearRequirementSearch() {
     requirementSearchBusy = false;
     document.getElementById("requirementSearchButton").disabled = false;
     document.getElementById("requirementBody").innerHTML = '<tr><td colspan="4">No search yet.</td></tr>';
-    document.getElementById("requirementStatus").textContent = "Choose a category and stock level, then press Search.";
+    document.getElementById("requirementStatus").textContent = "No results yet.";
     document.getElementById("requirementPageInfo").textContent = "Page 1";
     document.getElementById("requirementPrevious").disabled = true;
     document.getElementById("requirementNext").disabled = true;
@@ -2316,11 +2289,6 @@ function searchProducts() {
             }
         }, 250);
     }
-    if (allResults.length > results.length) {
-        document.getElementById("searchResults").insertAdjacentHTML("beforeend",
-            `<div class="small" style="padding:8px 0">Showing first ${results.length} matches. Add more letters to narrow the search.</div>`);
-    }
-
 }
 
 
@@ -2524,10 +2492,6 @@ function searchReturnProducts() {
                 }
             }
         }, 250);
-    }
-    if (allResults.length > results.length) {
-        document.getElementById("returnSearchResults").insertAdjacentHTML("beforeend",
-            `<div class="small" style="padding:8px 0">Showing first ${results.length} matches. Add more letters to narrow the search.</div>`);
     }
 }
 
@@ -4099,9 +4063,6 @@ window.stockAppShowLogin = function(message = "") {
     });
 };
 
-function showLoginScreen() {
-  if (!window.firebaseAuthReady) window.stockAppShowLogin();
-}
 window.firebaseAuthReady = false;
 window.stockSplashMinimum = new Promise(resolve => window.setTimeout(resolve, 3000));
 window.firebaseStartupTimer = window.setTimeout(() => {
