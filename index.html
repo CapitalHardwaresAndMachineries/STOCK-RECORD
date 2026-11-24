@@ -1355,6 +1355,7 @@ th { background: #f1f5f9; }
     <div>
         <h2>Order Management</h2>
     </div>
+    <button id="cancelAllManagementButton" class="orange" onclick="cancelAllManagementItems()" style="display:none">Cancel All</button>
     <button id="clearManagementButton" class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
     <button id="resetTestDataButton" class="red" onclick="resetAllTestData()" style="display:none">Reset All Test Data</button>
 </div>
@@ -1590,7 +1591,11 @@ function changeRole(assignedRole) {
     });
     const clearManagementButton = document.getElementById("clearManagementButton");
     if (clearManagementButton) {
-        clearManagementButton.style.display = role === "admin" ? "" : "none";
+        clearManagementButton.style.display = role === "admin" || role === "coadmin" ? "" : "none";
+    }
+    const cancelAllManagementButton = document.getElementById("cancelAllManagementButton");
+    if (cancelAllManagementButton) {
+        cancelAllManagementButton.style.display = role === "admin" || role === "coadmin" ? "" : "none";
     }
     const resetTestDataButton = document.getElementById("resetTestDataButton");
     if (resetTestDataButton) resetTestDataButton.style.display = role === "admin" ? "" : "none";
@@ -1651,6 +1656,16 @@ function changeRole(assignedRole) {
 // ======================================
 
 function showPage(id, button) {
+
+    const previousPageId = document.querySelector(".page.active")?.id;
+    if (previousPageId === "order" && id !== "order") {
+        clearSearchInput("orderSearch", false);
+        document.getElementById("customerName").value = "";
+    }
+    if (previousPageId === "returns" && id !== "returns") {
+        clearSearchInput("returnSearch", false);
+        document.getElementById("returnCustomerName").value = "";
+    }
 
     if (id === "management" && role === "staff") {
         alert("Staff cannot access Order Management.");
@@ -2217,6 +2232,11 @@ function toggleCustomer() {
     document.getElementById("customerField").style.display =
         type === "Customer Order" ? "block" : "none";
 
+    if (type !== "Customer Order") {
+        document.getElementById("customerName").value = "";
+    }
+    clearSearchInput("orderSearch", false);
+
 }
 
 
@@ -2231,7 +2251,7 @@ function updateSearchClearButton(inputId) {
 }
 
 
-function clearSearchInput(inputId) {
+function clearSearchInput(inputId, focusAfterClear = true) {
     const input = document.getElementById(inputId);
     if (!input) return;
     input.value = "";
@@ -2248,7 +2268,7 @@ function clearSearchInput(inputId) {
     }
 
     updateSearchClearButton(inputId);
-    input.focus();
+    if (focusAfterClear) input.focus();
 }
 
 
@@ -2262,10 +2282,27 @@ function setReturnQuantityDraft(id, value) {
 }
 
 
-function isProductLockedForManagement(productId) {
-    return orders.some(order =>
-        Array.isArray(order.items) && order.items.some(item => item.id === productId)
-    );
+function isProductLockedForManagement(productId, requestKind = "order", requestType = "Shop Order") {
+    return orders.some(order => {
+        const matchingItem = Array.isArray(order.items)
+            ? order.items.find(item => String(item.id) === String(productId))
+            : null;
+        if (!matchingItem) return false;
+
+        // Keep the existing return lock behavior across all request types.
+        if (requestKind === "return" || order.kind === "return") return true;
+
+        const existingType = order.type === "Customer Order" ? "Customer Order" : "Shop Order";
+        if (existingType !== requestType) return false;
+
+        // Shop items remain locked until Admin/Co-Admin clears Order Management.
+        // Customer items unlock only after stock-out is completed.
+        if (requestType === "Customer Order") {
+            const status = String(matchingItem.status || "Pending").toLowerCase();
+            return status !== "completed";
+        }
+        return true;
+    });
 }
 
 function formatRequestId(kind, type, sequence) {
@@ -2286,6 +2323,7 @@ function searchProducts() {
 
     let query = document.getElementById("orderSearch")
         .value.toLowerCase().trim();
+    const selectedOrderType = document.getElementById("orderType").value;
     const loadToken = ++orderSearchToken;
     clearTimeout(orderSearchTimer);
 
@@ -2307,7 +2345,7 @@ function searchProducts() {
             const stockProduct = products.find(item => item.id === p.id);
             const product = stockProduct || {...p, stock:0, stockReady:false};
             const cartItem = cart.find(item => item.id === p.id);
-            const locked = isProductLockedForManagement(p.id) || isProductAlreadyInEitherCart(p.id);
+            const locked = isProductLockedForManagement(p.id, "order", selectedOrderType) || isProductAlreadyInEitherCart(p.id);
             const waitingForOrders = !window.ordersDataReady;
             const quantityValue = orderQuantityDrafts.has(p.id)
                 ? orderQuantityDrafts.get(p.id)
@@ -2385,7 +2423,7 @@ async function addToCart(id) {
 
     if (!p || !p.stockReady) return;
 
-    if (isProductLockedForManagement(id) || isProductAlreadyInEitherCart(id)) return;
+    if (isProductLockedForManagement(id, "order", document.getElementById("orderType").value) || isProductAlreadyInEitherCart(id)) return;
 
     let quantityInput = document.getElementById("orderQty-" + id);
     let qty = Number(quantityInput ? quantityInput.value : (orderQuantityDrafts.get(id) || 1));
@@ -2504,6 +2542,8 @@ function removeCart(i) {
 function toggleReturnCustomer() {
     const isCustomerReturn = document.getElementById("returnType").value === "Customer Return";
     document.getElementById("returnCustomerField").style.display = isCustomerReturn ? "block" : "none";
+    if (!isCustomerReturn) document.getElementById("returnCustomerName").value = "";
+    clearSearchInput("returnSearch", false);
 }
 
 
@@ -2525,7 +2565,7 @@ function searchReturnProducts() {
         const stockProduct = products.find(item => item.id === product.id);
         const currentProduct = stockProduct || {...product, stock:0, stockReady:false};
         const cartItem = returnCart.find(item => item.id === product.id);
-        const locked = isProductLockedForManagement(product.id) || isProductAlreadyInEitherCart(product.id);
+        const locked = isProductLockedForManagement(product.id, "return") || isProductAlreadyInEitherCart(product.id);
         const waitingForOrders = !window.ordersDataReady;
         const quantityValue = returnQuantityDrafts.has(product.id)
             ? returnQuantityDrafts.get(product.id)
@@ -2581,7 +2621,7 @@ async function addToReturnCart(id) {
         return;
     }
     const product = products.find(item => item.id === id);
-    if (isProductLockedForManagement(id) || isProductAlreadyInEitherCart(id)) return;
+    if (isProductLockedForManagement(id, "return") || isProductAlreadyInEitherCart(id)) return;
     const quantityInput = document.getElementById("returnQty-" + id);
     const quantity = Number(quantityInput ? quantityInput.value : (returnQuantityDrafts.get(id) || 1));
     if (!product || !Number.isInteger(quantity) || quantity < 1) {
@@ -2679,6 +2719,14 @@ async function submitReturn() {
         alert("Enter the customer name.");
         return;
     }
+    const lockedReturnItems = returnCart.filter(item =>
+        isProductLockedForManagement(item.id, "return")
+    );
+    if (lockedReturnItems.length) {
+        alert(`These item(s) already have an active order or return: ${lockedReturnItems.map(item => item.name).join(", ")}.`);
+        searchReturnProducts();
+        return;
+    }
     for (const item of returnCart) {
         if (!products.some(product => product.id === item.id)) {
             alert(`Product ${item.id} is no longer in inventory. Refresh and try again.`);
@@ -2755,6 +2803,15 @@ async function submitOrder() {
 
     if (type === "Customer Order" && !customer) {
         alert("Enter customer name.");
+        return;
+    }
+
+    const lockedOrderItems = cart.filter(item =>
+        isProductLockedForManagement(item.id, "order", type)
+    );
+    if (lockedOrderItems.length) {
+        alert(`These item(s) already have an active ${type.toLowerCase()}: ${lockedOrderItems.map(item => item.name).join(", ")}.`);
+        searchProducts();
         return;
     }
 
@@ -2889,10 +2946,79 @@ async function resetAllTestData() {
     }
 }
 
+async function cancelAllManagementItems() {
+
+    if (role !== "admin" && role !== "coadmin") {
+        alert("Only Admin and Co-Admin can cancel all orders and returns.");
+        return;
+    }
+
+    const pendingByOrder = orders.map(order => ({
+        order,
+        items: (order.items || []).filter(item =>
+            ["pending", "approved"].includes(String(item.status || "").toLowerCase())
+        )
+    })).filter(entry => entry.items.length);
+    const itemCount = pendingByOrder.reduce((sum, entry) => sum + entry.items.length, 0);
+    if (!itemCount) {
+        alert("There are no pending or approved items to cancel.");
+        return;
+    }
+
+    if (!confirm(`Cancel all ${itemCount} pending or approved order/return item(s)? They will be marked Denied, kept in the existing records, and no stock will move.`)) return;
+    if (!window.firebaseData?.setOrder || !window.firebaseData?.recordOrderDecision) {
+        alert("Could not cancel orders because Firebase is not ready.");
+        return;
+    }
+
+    const button = document.getElementById("cancelAllManagementButton");
+    if (button) button.disabled = true;
+    let cancelled = 0;
+    try {
+        for (const entry of pendingByOrder) {
+            const cancelledItemIds = new Set(entry.items.map(item => String(item.id)));
+            const updatedOrder = {
+                ...entry.order,
+                items: (entry.order.items || []).map(item => cancelledItemIds.has(String(item.id))
+                    ? {...item, status:"Denied"}
+                    : item)
+            };
+            await window.firebaseData.setOrder(updatedOrder);
+            orders = upsertOrder(orders, updatedOrder);
+
+            for (const item of updatedOrder.items) {
+                if (!cancelledItemIds.has(String(item.id))) continue;
+                const decisionEvent = await window.firebaseData.recordOrderDecision(
+                    updatedOrder,
+                    item,
+                    "Denied",
+                    Date.now()
+                );
+                orderHistory = [decisionEvent, ...orderHistory.filter(event => event.id !== decisionEvent.id)];
+                cancelled++;
+            }
+        }
+        renderManagement();
+        searchProducts();
+        searchReturnProducts();
+        updateDashboard();
+        renderOrderHistory();
+        renderStaffOrderHistory();
+        alert(`Cancelled ${cancelled} item(s). They are marked Denied; no stock was changed.`);
+    } catch (error) {
+        console.error("Could not cancel all active order items:", error);
+        renderManagement();
+        updateDashboard();
+        alert(`Cancellation stopped after ${cancelled} item(s). Refresh the page to load the latest order status, then retry if needed.`);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
 async function clearOrderManagement() {
 
-    if (role !== "admin") {
-        alert("Only Admin can clear Order Management.");
+    if (role !== "admin" && role !== "coadmin") {
+        alert("Only Admin and Co-Admin can clear Order Management.");
         return;
     }
 
