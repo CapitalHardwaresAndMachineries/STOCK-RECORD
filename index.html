@@ -93,7 +93,7 @@ main {
 
 .stats {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
     gap: 11px;
 }
 
@@ -210,6 +210,11 @@ button:disabled {
 .requirement-filters input { width: 150px; }
 .requirement-threshold-field { width: 150px; }
 
+.requirement-threshold-field input {
+    width: 100%;
+    padding-right: 42px;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
@@ -275,6 +280,24 @@ th { background: #f1f5f9; }
     margin-bottom: 6px;
 }
 
+.management-view-switch {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 0 0 12px;
+}
+
+.management-view-button {
+    background: #e2e8f0;
+    color: #1e293b;
+    padding: 7px 11px;
+}
+
+.management-view-button.active {
+    background: #1d4ed8;
+    color: #fff;
+}
+
 @media(max-width: 700px) {
     .management-heading {
         align-items: flex-start;
@@ -282,6 +305,11 @@ th { background: #f1f5f9; }
 
     .management-heading button {
         width: 100%;
+    }
+
+    .management-view-button {
+        width: auto;
+        flex: 1 1 auto;
     }
 }
 
@@ -639,6 +667,17 @@ th { background: #f1f5f9; }
     }
 
     .requirement-threshold-field { width: 100%; }
+
+    /* Keep the clear X inside the quantity field instead of stretching it
+       across the full mobile filter width. */
+    .requirement-filters .requirement-threshold-field .search-clear-button {
+        width: 28px;
+        min-width: 28px;
+        height: 28px;
+        padding: 0;
+        font-size: 16px;
+        line-height: 1;
+    }
 
     .product-result {
         align-items: center;
@@ -1044,8 +1083,18 @@ th { background: #f1f5f9; }
     </div>
 
     <div class="stat">
-        <div class="small">Pending Order &amp; Return Items</div>
-        <h2 id="pendingOrders">0</h2>
+        <div class="small">Shop Pending</div>
+        <h2 id="pendingShopOrders">0</h2>
+    </div>
+
+    <div class="stat">
+        <div class="small">Customer Pending</div>
+        <h2 id="pendingCustomerOrders">0</h2>
+    </div>
+
+    <div class="stat">
+        <div class="small">Return Pending</div>
+        <h2 id="pendingReturnItems">0</h2>
     </div>
 
 </div>
@@ -1310,6 +1359,13 @@ th { background: #f1f5f9; }
     <button id="resetTestDataButton" class="red" onclick="resetAllTestData()" style="display:none">Reset All Test Data</button>
 </div>
 
+<div class="management-view-switch" role="group" aria-label="Order management views">
+    <button type="button" class="management-view-button active" data-management-view="all" aria-pressed="true" onclick="setManagementView('all',this)">All</button>
+    <button type="button" class="management-view-button" data-management-view="shop" aria-pressed="false" onclick="setManagementView('shop',this)">Shop Orders</button>
+    <button type="button" class="management-view-button" data-management-view="customer" aria-pressed="false" onclick="setManagementView('customer',this)">Customer Orders</button>
+    <button type="button" class="management-view-button" data-management-view="returns" aria-pressed="false" onclick="setManagementView('returns',this)">Returns</button>
+</div>
+
 <div id="orderList"></div>
 
 </section>
@@ -1414,6 +1470,7 @@ window.productDataReady = false;
 window.ordersDataReady = false;
 let productUpdateBusy = false;
 let managementStockLoadInProgress = false;
+let managementView = "all";
 
 function updateCachedStock(rows) {
     const receivedAt = Date.now();
@@ -1648,6 +1705,17 @@ function showPage(id, button) {
         staffHistoryReady = false;
     }
 
+}
+
+function setManagementView(view, button) {
+    if (!["all", "shop", "customer", "returns"].includes(view)) return;
+    managementView = view;
+    document.querySelectorAll(".management-view-button").forEach(tab => {
+        const active = tab.dataset.managementView === view;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    renderManagement();
 }
 
 
@@ -2200,6 +2268,14 @@ function isProductLockedForManagement(productId) {
     );
 }
 
+function formatRequestId(kind, type, sequence) {
+    const prefix = kind === "return"
+        ? "RET"
+        : type === "Customer Order" ? "CUST" : "SHOP";
+    return `${prefix}-${String(sequence).padStart(4, "0")}`;
+}
+window.stockAppFormatRequestId = formatRequestId;
+
 
 function isProductAlreadyInEitherCart(productId) {
     return cart.some(item => item.id === productId) ||
@@ -2611,7 +2687,7 @@ async function submitReturn() {
     }
 
     const order = {
-        id: "RET-" + String(activeOrderSequence).padStart(4, "0"),
+        id: formatRequestId("return", type, activeOrderSequence),
         recordId: "RETREC-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10),
         kind: "return",
         type,
@@ -2695,7 +2771,7 @@ async function submitOrder() {
 
     let order = {
 
-        id: "ORD-" + String(activeOrderSequence).padStart(4,"0"),
+        id: formatRequestId("order", type, activeOrderSequence),
         recordId: "ORDREC-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10),
 
         type,
@@ -2804,7 +2880,7 @@ async function resetAllTestData() {
         renderStaffOrderHistory();
         renderInventory();
         updateDashboard();
-        alert(`Reset complete. Deleted ${result.deleted} records. The next order will be ORD-0001. Upload the stock workbook to restore current quantities.`);
+        alert(`Reset complete. Deleted ${result.deleted} records. New IDs will start at SHOP-0001, CUST-0001, and RET-0001. Upload the stock workbook to restore current quantities.`);
     } catch (error) {
         console.error("Could not reset test data:", error);
         alert("Could not reset all test data. Check Firebase rules/connection. Some collections may already have been cleared; run Reset All Test Data again to finish.");
@@ -2857,7 +2933,7 @@ async function clearOrderManagement() {
         updateDashboard();
         renderOrderHistory();
         renderStaffOrderHistory();
-        alert(`Cleared ${cleared.length} order/return record(s). ${orders.length} pending record(s) remain and now use ORD-${String(activeOrderSequence).padStart(4,"0")}. Cleared items remain in Order History.`);
+        alert(`Cleared ${cleared.length} order/return record(s). ${orders.length} pending record(s) remain and their IDs have advanced. Cleared items remain in Order History.`);
     } catch (error) {
         console.error("Could not clear Order Management:", error);
         const clearedIds = new Set(error.clearedIds || []);
@@ -2886,6 +2962,7 @@ function renderManagement() {
 
     let container = document.getElementById("orderList");
     const canEditQuantities = role === "admin" || role === "coadmin";
+    const viewLabels = {all:"orders or returns", shop:"shop orders", customer:"customer orders", returns:"returns"};
     const savedHorizontalPositions = new Map(
         [...container.querySelectorAll(".table-wrap[data-category-key]")].map(table => [
             table.dataset.categoryKey,
@@ -2894,9 +2971,16 @@ function renderManagement() {
     );
     orders = dedupeOrders(orders);
 
-    if (orders.length === 0) {
-        container.innerHTML =
-            '<div class="empty">No incoming orders or returns yet.</div>';
+    const visibleOrders = orders.filter(order => {
+        const isReturn = order.kind === "return";
+        if (managementView === "returns") return isReturn;
+        if (managementView === "shop") return !isReturn && order.type !== "Customer Order";
+        if (managementView === "customer") return !isReturn && order.type === "Customer Order";
+        return true;
+    });
+
+    if (visibleOrders.length === 0) {
+        container.innerHTML = `<div class="empty">No ${viewLabels[managementView]} yet.</div>`;
         return;
     }
 
@@ -2921,7 +3005,7 @@ function renderManagement() {
     // category so interleaved submissions cannot split category sections.
     const orderTime = order =>
         Number(order.createdAtValue || 0) || Date.parse(order.date || "") || 0;
-    const newestFirstOrders = [...orders].sort((a, b) =>
+    const newestFirstOrders = [...visibleOrders].sort((a, b) =>
         orderTime(b) - orderTime(a) ||
         String(orderRecordKey(a) || "").localeCompare(String(orderRecordKey(b) || ""))
     );
@@ -3191,13 +3275,19 @@ function updateDashboard() {
     document.getElementById("totalStock").textContent =
         dashboardStockSummary.loaded ? dashboardStockSummary.totalStock : "…";
 
-    // Count each pending product line separately, even when
-    // several pending items belong to the same order/category.
-    document.getElementById("pendingOrders").textContent =
-        orders.reduce((total, order) =>
-            total + order.items.filter(item => item.status === "Pending").length,
-            0
-        );
+    // Count pending product lines separately, grouped by request type.
+    const pendingCount = predicate => orders.reduce((total, order) => {
+        if (!predicate(order)) return total;
+        return total + (Array.isArray(order.items)
+            ? order.items.filter(item => String(item.status || "").toLowerCase() === "pending").length
+            : 0);
+    }, 0);
+    document.getElementById("pendingShopOrders").textContent =
+        pendingCount(order => order.kind !== "return" && order.type !== "Customer Order");
+    document.getElementById("pendingCustomerOrders").textContent =
+        pendingCount(order => order.kind !== "return" && order.type === "Customer Order");
+    document.getElementById("pendingReturnItems").textContent =
+        pendingCount(order => order.kind === "return");
 
     const select =
         document.getElementById("dashboardCategory");
@@ -4680,8 +4770,11 @@ window.firebaseData = {
             clearedOrders.push({...historyOrder, docId:historyId});
           }
           if (pendingItems.length) {
-            const prefix = order.kind === "return" ? "RET" : "ORD";
-            const updatedPending = {...order, id:`${prefix}-${String(nextSequence).padStart(4,"0")}`, items:pendingItems};
+            const updatedPending = {
+              ...order,
+              id:window.stockAppFormatRequestId(order.kind, order.type, nextSequence),
+              items:pendingItems
+            };
             batch.set(doc(db, "orders", recordId), updatedPending);
             if (isStaffOrder(order)) batch.set(doc(db, "staffOrderHistory", recordId), {...order, id:updatedPending.id});
             pendingOrders.push({...updatedPending, docId:recordId});
