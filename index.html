@@ -373,6 +373,18 @@ th { background: #f1f5f9; }
     line-height: 1.35;
 }
 
+.staff-history-order-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    white-space: normal;
+}
+
+.staff-history-order-cell small {
+    color: #64748b;
+    font-size: 10px;
+}
+
 .staff-history-header {
     font-weight: 700;
     color: #475569;
@@ -1576,6 +1588,24 @@ let staffHistoryClearedAt = 0;
 let adminHistoryClearedAt = 0;
 
 let role = "admin";
+let signedInIdentity = {uid:"", email:"", displayName:"", staffCode:""};
+
+function submitterLabel(record) {
+    const name = String(record?.createdByName || record?.requestedByName || "").trim();
+    const code = String(record?.createdByCode || record?.requestedByCode || "").trim();
+    if (name && code) return `${name} (${code})`;
+    if (name) return name;
+    return String(record?.createdBy || record?.requestedByEmail || "—");
+}
+
+function currentSubmitterFields() {
+    return {
+        createdBy: role.toUpperCase(),
+        createdByName: signedInIdentity.displayName,
+        createdByCode: signedInIdentity.staffCode,
+        createdByUid: signedInIdentity.uid
+    };
+}
 
 function persistFirebase(operation) {
     if (operation && typeof operation.catch === "function") {
@@ -2794,7 +2824,7 @@ async function submitReturn() {
         kind: "return",
         type,
         customer,
-        createdBy: role.toUpperCase(),
+        ...currentSubmitterFields(),
         date: formatDateTime12h(new Date()),
         createdAtValue: Date.now(),
         items: returnCart.map(item => ({
@@ -2888,7 +2918,7 @@ async function submitOrder() {
         type,
         customer,
 
-        createdBy: role.toUpperCase(),
+        ...currentSubmitterFields(),
 
         date: formatDateTime12h(new Date()),
         createdAtValue: Date.now(),
@@ -2994,7 +3024,7 @@ function renderQuantityChangeRequestsPanel() {
             <div class="quantity-change-request-details">
                 <strong>${escapeHTML(orderLabel)} · ${escapeHTML(request.orderType || "Order")} · ${escapeHTML(request.productName || request.productId)}</strong>
                 <div>Quantity: ${Number(request.currentQuantity)} → <strong>${Number(request.requestedQuantity)}</strong></div>
-                <div class="small">Requested by ${escapeHTML(request.requestedByEmail || "Staff")} · ${escapeHTML(request.createdAt || "")}</div>
+                <div class="small">Requested by ${escapeHTML(submitterLabel(request))} · ${escapeHTML(request.createdAt || "")}</div>
                 <div class="small">Reason: ${escapeHTML(request.reason || "—")}</div>
                 ${reviewerMessage}
             </div>
@@ -3041,7 +3071,9 @@ async function requestOrderQuantityChange(orderRecordId, productId, currentQuant
             productId,
             currentQuantity:Number(currentQuantity),
             requestedQuantity,
-            reason:reason.trim()
+            reason:reason.trim(),
+            requestedByName:signedInIdentity.displayName,
+            requestedByCode:signedInIdentity.staffCode
         });
         quantityChangeRequests = [request, ...quantityChangeRequests.filter(existing => existing.id !== request.id)];
         renderStaffOrderHistory();
@@ -3230,7 +3262,7 @@ function renderManagement() {
                 <tr>
                     <td>${escapeHTML(order.id)}</td>
                     <td><span class="badge ${isReturn ? "badge-return" : "badge-order"}">${escapeHTML(order.type)}</span></td>
-                    <td>${escapeHTML(order.createdBy)} · ${escapeHTML(formatDateTime12h(order.createdAtValue || order.date))}${order.customer ? `<br>${escapeHTML(order.customer)}` : ""}</td>
+                    <td>${escapeHTML(submitterLabel(order))} · ${escapeHTML(formatDateTime12h(order.createdAtValue || order.date))}${order.customer ? `<br>${escapeHTML(order.customer)}` : ""}</td>
                     <td>${escapeHTML(item.id)}</td>
                     <td class="important-product-name">${escapeHTML(item.name)}</td>
                     <td class="important-stock-value">${available}</td>
@@ -3882,6 +3914,7 @@ function renderStaffOrderHistory() {
                     ? new Date(order.createdAtValue).toLocaleDateString()
                     : String(order.date || "").split(",")[0],
                 orderId: order.id,
+                submittedBy: submitterLabel(order),
                 orderRecordId: order.recordId || order.docId || order.id,
                 productId: item.id,
                 productName: item.name,
@@ -3907,7 +3940,7 @@ function renderStaffOrderHistory() {
     container.innerHTML = `
         <div class="staff-history-row staff-history-header">
             <span>Date</span>
-            <span>Order ID</span>
+            <span>Order ID / Staff</span>
             <span>Product</span>
             <span>Quantity Changes</span>
             <span>Category</span>
@@ -3932,7 +3965,7 @@ function renderStaffOrderHistory() {
             return `
             <div class="staff-history-row">
                 <span>${escapeHTML(item.date)}</span>
-                <span>${escapeHTML(item.orderId)}</span>
+                <span class="staff-history-order-cell"><strong>${escapeHTML(item.orderId)}</strong><small>${escapeHTML(item.submittedBy)}</small></span>
                 <span title="${escapeAttr(item.productName)}">
                     ${escapeHTML(item.productName)} (${escapeHTML(item.productId)})
                 </span>
@@ -4018,6 +4051,8 @@ function getAdminOrderHistoryItems() {
                     : (order.kind === "return" ? "Pending Return" : "Pending Order"),
                 status: item.status,
                 createdBy: order.createdBy,
+                createdByName: order.createdByName || "",
+                createdByCode: order.createdByCode || "",
                 orderDate: order.date,
                 customer: order.customer,
                 productId: item.id,
@@ -4069,6 +4104,7 @@ function renderOrderHistory() {
                     <tr>
                         <th>Date</th>
                         <th>Order ID</th>
+                        <th>Submitted By</th>
                         <th>Product ID</th>
                         <th>Product Name</th>
                         <th>Category</th>
@@ -4083,6 +4119,7 @@ function renderOrderHistory() {
                         <tr>
                             <td>${escapeHTML(formatDateTime12h(item.completedAtValue || item.completedAt))}</td>
                             <td>${escapeHTML(item.orderId)}</td>
+                            <td>${escapeHTML(submitterLabel(item))}</td>
                             <td>${escapeHTML(item.productId)}</td>
                             <td>${escapeHTML(item.productName)}</td>
                             <td>${escapeHTML(item.category)}</td>
@@ -4161,6 +4198,7 @@ function downloadOrderHistoryExcel() {
     const headers = [
         "Date",
         "Order ID",
+        "Submitted By",
         "Product ID",
         "Product Name",
         "Category",
@@ -4174,6 +4212,7 @@ function downloadOrderHistoryExcel() {
         <tr>
             <td>${escapeHTML(formatDateTime12h(item.completedAtValue || item.completedAt))}</td>
             <td>${escapeHTML(item.orderId)}</td>
+            <td>${escapeHTML(submitterLabel(item))}</td>
             <td>${escapeHTML(item.productId)}</td>
             <td>${escapeHTML(item.productName)}</td>
             <td>${escapeHTML(item.category)}</td>
@@ -4360,12 +4399,18 @@ window.stockAppApplyFirebaseData = function(data) {
     }
 };
 
-window.stockAppSetRole = async function(assignedRole, email) {
+window.stockAppSetRole = async function(assignedRole, email, profileData = {}, uid = "") {
     await window.stockSplashMinimum;
     role = assignedRole;
+    signedInIdentity = {
+        uid: String(uid || ""),
+        email: String(email || ""),
+        displayName: String(profileData.displayName || "").trim(),
+        staffCode: String(profileData.staffCode || "").trim()
+    };
     const roleLabels = {admin: "Admin", coadmin: "Co-Admin", staff: "Staff"};
     document.getElementById("userIdentity").textContent =
-        `${roleLabels[assignedRole] || assignedRole} · ${email || ""}`;
+        `${roleLabels[assignedRole] || assignedRole}${signedInIdentity.displayName ? ` · ${signedInIdentity.displayName}${signedInIdentity.staffCode ? ` (${signedInIdentity.staffCode})` : ""}` : ""} · ${email || ""}`;
     document.getElementById("loginScreen").style.display = "none";
     document.getElementById("loadingScreen").style.display = "none";
     document.getElementById("stockApp").style.display = "block";
@@ -4662,6 +4707,9 @@ window.firebaseData = {
       type: orderData.type || "",
       customer: orderData.customer || "",
       createdBy: orderData.createdBy || "",
+      createdByName: orderData.createdByName || "",
+      createdByCode: orderData.createdByCode || "",
+      createdByUid: orderData.createdByUid || "",
       productId: item.id,
       productName: item.name,
       category: item.category,
@@ -4725,6 +4773,9 @@ window.firebaseData = {
       type: orderData.type || "",
       customer: orderData.customer || "",
       createdBy: orderData.createdBy || "",
+      createdByName: orderData.createdByName || "",
+      createdByCode: orderData.createdByCode || "",
+      createdByUid: orderData.createdByUid || "",
       productId: returnItem.id,
       productName: returnItem.name,
       category: returnItem.category,
@@ -4787,7 +4838,7 @@ window.firebaseData = {
     if (isStaffOrder(order)) batch.set(doc(db, "staffOrderHistory", recordId), order);
     await batch.commit();
   },
-  createQuantityChangeRequest: async ({orderRecordId, productId, currentQuantity, requestedQuantity, reason}) => {
+  createQuantityChangeRequest: async ({orderRecordId, productId, currentQuantity, requestedQuantity, reason, requestedByName, requestedByCode}) => {
     const user = auth.currentUser;
     if (!user) throw new Error("Sign in again before requesting a quantity change.");
     const requestRef = doc(collection(db, "quantityChangeRequests"));
@@ -4800,6 +4851,8 @@ window.firebaseData = {
       reason:String(reason || "").trim().slice(0, 250),
       requestedBy:user.uid,
       requestedByEmail:user.email || "Staff",
+      requestedByName:String(requestedByName || "").trim().slice(0, 60),
+      requestedByCode:String(requestedByCode || "").trim().slice(0, 20),
       createdBy:"STAFF",
       createdAt:window.formatDateTime12h(new Date()),
       createdAtValue:Date.now(),
@@ -4872,7 +4925,7 @@ window.firebaseData = {
     item.quantityChanges = Array.isArray(item.quantityChanges) ? item.quantityChanges : [];
     item.quantityChanges.push({
       by:`Staff request approved by ${reviewedBy}`,
-      requestedBy:requestData.requestedByEmail || "Staff",
+      requestedBy:submitterLabel(requestData),
       from:previousQuantity,
       to:item.qty,
       reason:requestData.reason || "",
@@ -5202,7 +5255,7 @@ function startHistoryListeners() {
   });
 }
 
-async function startWorkspace(user, role) {
+async function startWorkspace(user, role, profileData = {}) {
   clearListeners();
   window.productDataReady = false;
   window.ordersDataReady = false;
@@ -5241,7 +5294,7 @@ async function startWorkspace(user, role) {
   products = catalogProducts.map(item => ({...item,stock:0,stockReady:false}));
   stockCacheTimes.clear();
   window.productDataReady = true;
-  window.stockAppSetRole(role, user.email);
+  window.stockAppSetRole(role, user.email, profileData, user.uid);
   publish();
   try {
     dashboardStockSummary = {...await window.firebaseData.getStockSummary(), loaded:true};
@@ -5286,15 +5339,16 @@ onAuthStateChanged(auth, async user => {
       getDoc(doc(db, "user", user.uid)),
       profileTimeoutPromise
     ]).finally(() => window.clearTimeout(profileTimeout));
+    const profileData = profile.exists() ? profile.data() : {};
     const role = profile.exists()
-      ? String(profile.data().role || "").toLowerCase().replace(/[^a-z]/g, "")
+      ? String(profileData.role || "").toLowerCase().replace(/[^a-z]/g, "")
       : "";
     if (!["admin", "coadmin", "staff"].includes(role)) {
       signOutMessage = "This account has no assigned role. Ask your Firebase administrator to add a users/UID profile with role admin, coadmin, or staff.";
       await signOut(auth);
       return;
     }
-    await startWorkspace(user, role);
+    await startWorkspace(user, role, profileData);
   } catch (error) {
     console.error("Could not load Firebase user profile:", error);
     if (String(error.message || "").includes("GitHub product catalogue")) {
