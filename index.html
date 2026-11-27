@@ -298,6 +298,32 @@ th { background: #f1f5f9; }
     color: #fff;
 }
 
+.quantity-change-request {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 11px 0;
+    border-top: 1px solid #e2e8f0;
+}
+
+.quantity-change-request-details {
+    min-width: 220px;
+    flex: 1 1 360px;
+}
+
+.quantity-change-request-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.staff-change-request-button {
+    padding: 6px 9px;
+    font-size: 12px;
+    white-space: normal;
+}
+
 @media(max-width: 700px) {
     .management-heading {
         align-items: flex-start;
@@ -333,7 +359,7 @@ th { background: #f1f5f9; }
 
 .staff-history-row {
     display: grid;
-    grid-template-columns: 125px 105px minmax(170px, 1.3fr) minmax(220px, 1.7fr) 100px 70px minmax(130px, 1fr) 90px;
+    grid-template-columns: 125px 105px minmax(170px, 1.3fr) minmax(220px, 1.7fr) 100px 70px minmax(130px, 1fr) 90px minmax(145px, 1fr);
     align-items: center;
     gap: 12px;
     padding: 9px 2px;
@@ -368,7 +394,7 @@ th { background: #f1f5f9; }
     }
 
     .staff-history-row {
-        min-width: 1030px;
+        min-width: 1180px;
     }
 }
 
@@ -1365,6 +1391,8 @@ th { background: #f1f5f9; }
     <button type="button" class="management-view-button" data-management-view="returns" aria-pressed="false" onclick="setManagementView('returns',this)">Returns</button>
 </div>
 
+<div id="quantityChangeRequestsPanel" class="card" hidden></div>
+
 <div id="orderList"></div>
 
 </section>
@@ -1516,6 +1544,9 @@ let staffOrderHistory = [];
 let staffHistoryReady = false;
 let staffHistoryLoading = null;
 let staffHistoryUnsubscribe = null;
+let quantityChangeRequests = [];
+let quantityChangeRequestsUnsubscribe = null;
+const quantityChangeRequestBusy = new Set();
 let legacyStaffHistoryMigrated = false;
 let historyUnsubscribers = [];
 let historyDataReady = false;
@@ -1650,14 +1681,6 @@ function changeRole(assignedRole) {
 function showPage(id, button) {
 
     const previousPageId = document.querySelector(".page.active")?.id;
-    if (previousPageId === "order" && id !== "order") {
-        clearSearchInput("orderSearch", false);
-        document.getElementById("customerName").value = "";
-    }
-    if (previousPageId === "returns" && id !== "returns") {
-        clearSearchInput("returnSearch", false);
-        document.getElementById("returnCustomerName").value = "";
-    }
 
     if (id === "management" && role === "staff") {
         alert("Staff cannot access Order Management.");
@@ -1678,6 +1701,8 @@ function showPage(id, button) {
         alert("Only Admin can access Requirements.");
         return;
     }
+
+    if (previousPageId && previousPageId !== id) resetPageSearch(previousPageId);
 
     document.querySelectorAll(".page").forEach(p =>
         p.classList.remove("active")
@@ -1706,12 +1731,49 @@ function showPage(id, button) {
     if (id === "dashboard" || id === "history") {
         window.setTimeout(startHistoryListeners, 0);
     }
+    if (id === "management" || id === "staffhistory") startQuantityChangeRequestListener();
+    else stopQuantityChangeRequestListener();
     if (id !== "staffhistory" && staffHistoryUnsubscribe) {
         staffHistoryUnsubscribe();
         staffHistoryUnsubscribe = null;
         staffHistoryReady = false;
     }
 
+}
+
+function resetPageSearch(pageId) {
+    if (pageId === "inventory") {
+        clearSearchInput("inventorySearch", false);
+    } else if (pageId === "order") {
+        clearSearchInput("orderSearch", false);
+        document.getElementById("customerName").value = "";
+    } else if (pageId === "returns") {
+        clearSearchInput("returnSearch", false);
+        document.getElementById("returnCustomerName").value = "";
+    } else if (pageId === "requirements") {
+        clearRequirementSearch();
+    }
+}
+
+function startQuantityChangeRequestListener() {
+    if (quantityChangeRequestsUnsubscribe || !window.firebaseData?.listenQuantityChangeRequests) return;
+    quantityChangeRequestsUnsubscribe = window.firebaseData.listenQuantityChangeRequests(rows => {
+        quantityChangeRequests = rows;
+        if (document.getElementById("management")?.classList.contains("active")) renderManagement();
+        if (document.getElementById("staffhistory")?.classList.contains("active")) renderStaffOrderHistory();
+    }, error => {
+        console.error("Could not load quantity change requests:", error);
+        const panel = document.getElementById("quantityChangeRequestsPanel");
+        if (panel && document.getElementById("management")?.classList.contains("active")) {
+            panel.hidden = false;
+            panel.innerHTML = '<strong>Could not load quantity change requests.</strong> Publish the updated Firestore rules, then refresh this page.';
+        }
+    });
+}
+
+function stopQuantityChangeRequestListener() {
+    if (quantityChangeRequestsUnsubscribe) quantityChangeRequestsUnsubscribe();
+    quantityChangeRequestsUnsubscribe = null;
 }
 
 function setManagementView(view, button) {
@@ -2903,6 +2965,121 @@ function upsertOrder(records, order) {
     return dedupeOrders([...records.filter(item => String(orderRecordKey(item) || "") !== key), order]);
 }
 
+function quantityChangeRequestFor(orderRecordId, productId) {
+    return quantityChangeRequests
+        .filter(request => request.orderRecordId === orderRecordId && request.productId === productId)
+        .sort((a, b) => Number(b.createdAtValue || 0) - Number(a.createdAtValue || 0))[0] || null;
+}
+
+function renderQuantityChangeRequestsPanel() {
+    const panel = document.getElementById("quantityChangeRequestsPanel");
+    if (!panel) return;
+    const pendingRequests = quantityChangeRequests
+        .filter(request => request.status === "Pending")
+        .sort((a, b) => Number(b.createdAtValue || 0) - Number(a.createdAtValue || 0));
+    panel.hidden = pendingRequests.length === 0;
+    if (!pendingRequests.length) {
+        panel.innerHTML = "";
+        return;
+    }
+    panel.innerHTML = `<h3>Quantity Change Requests</h3>${pendingRequests.map(request => {
+        const order = orders.find(candidate => orderRecordKey(candidate) === request.orderRecordId);
+        const item = order?.items?.find(candidate => candidate.id === request.productId);
+        const canApprove = Boolean(item && item.status === "Pending" && Number(item.qty) === Number(request.currentQuantity));
+        const orderLabel = order?.id || request.orderId || request.orderRecordId;
+        const reviewerMessage = canApprove
+            ? ""
+            : `<div class="small">This order item has changed since the request. Deny this request before taking another action.</div>`;
+        return `<div class="quantity-change-request">
+            <div class="quantity-change-request-details">
+                <strong>${escapeHTML(orderLabel)} · ${escapeHTML(request.productName || request.productId)}</strong>
+                <div>Quantity: ${Number(request.currentQuantity)} → <strong>${Number(request.requestedQuantity)}</strong></div>
+                <div class="small">Requested by ${escapeHTML(request.requestedByEmail || "Staff")} · ${escapeHTML(request.createdAt || "")}</div>
+                <div class="small">Reason: ${escapeHTML(request.reason || "—")}</div>
+                ${reviewerMessage}
+            </div>
+            <div class="quantity-change-request-actions">
+                <button class="green" type="button" onclick="resolveQuantityChangeRequest('${escapeAttr(request.id)}','Approved')" ${canApprove ? "" : "disabled"}>Approve</button>
+                <button class="red" type="button" onclick="resolveQuantityChangeRequest('${escapeAttr(request.id)}','Denied')">Deny</button>
+            </div>
+        </div>`;
+    }).join("")}`;
+}
+
+async function requestOrderQuantityChange(orderRecordId, productId, currentQuantity) {
+    if (role !== "staff") return alert("Only Staff can request a quantity change.");
+    const order = orders.find(candidate => orderRecordKey(candidate) === orderRecordId);
+    const item = order?.items?.find(candidate => candidate.id === productId);
+    if (!order || !item || item.status !== "Pending") {
+        return alert("Quantity changes can only be requested for pending order items.");
+    }
+    const currentRequest = quantityChangeRequestFor(orderRecordId, productId);
+    if (currentRequest?.status === "Pending") {
+        return alert("A quantity change request is already waiting for Admin or Co-Admin.");
+    }
+
+    const quantityText = prompt(`Current quantity: ${currentQuantity}\nEnter the new total quantity:`, String(currentQuantity));
+    if (quantityText === null) return;
+    const requestedQuantity = Number(quantityText.trim());
+    if (!Number.isSafeInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity === Number(currentQuantity)) {
+        alert("Enter a whole quantity greater than zero and different from the current quantity.");
+        return;
+    }
+    const reason = prompt("Why does this order quantity need to change?");
+    if (reason === null) return;
+    if (!reason.trim()) {
+        alert("Enter a short reason for the change request.");
+        return;
+    }
+
+    const busyKey = `${orderRecordId}::${productId}`;
+    if (quantityChangeRequestBusy.has(busyKey)) return;
+    quantityChangeRequestBusy.add(busyKey);
+    try {
+        const request = await window.firebaseData.createQuantityChangeRequest({
+            orderRecordId,
+            productId,
+            currentQuantity:Number(currentQuantity),
+            requestedQuantity,
+            reason:reason.trim()
+        });
+        quantityChangeRequests = [request, ...quantityChangeRequests.filter(existing => existing.id !== request.id)];
+        renderStaffOrderHistory();
+        alert("Quantity change request sent to Admin and Co-Admin. The order quantity remains unchanged until approved.");
+    } catch (error) {
+        console.error("Could not submit quantity change request:", error);
+        alert(error.message || "Could not send the quantity change request. Check the connection and updated Firestore rules.");
+    } finally {
+        quantityChangeRequestBusy.delete(busyKey);
+    }
+}
+
+async function resolveQuantityChangeRequest(requestId, decision) {
+    if (role !== "admin" && role !== "coadmin") return alert("Only Admin and Co-Admin can review quantity change requests.");
+    if (!["Approved", "Denied"].includes(decision)) return;
+    const request = quantityChangeRequests.find(candidate => candidate.id === requestId);
+    if (!request || request.status !== "Pending") return;
+    if (decision === "Denied" && !confirm(`Deny the requested quantity change from ${request.currentQuantity} to ${request.requestedQuantity}?`)) return;
+
+    try {
+        const result = await window.firebaseData.resolveQuantityChangeRequest(requestId, decision, role);
+        if (result.order) orders = upsertOrder(orders, result.order);
+        quantityChangeRequests = quantityChangeRequests.map(existing => existing.id === requestId ? result.request : existing);
+        if (result.order && isStaffOrder(result.order)) {
+            staffOrderHistory = upsertOrder(staffOrderHistory, result.order);
+        }
+        renderManagement();
+        renderStaffOrderHistory();
+        updateDashboard();
+        alert(decision === "Approved"
+            ? `Approved. The pending order quantity is now ${request.requestedQuantity}.`
+            : "Quantity change request denied. The original order quantity is unchanged.");
+    } catch (error) {
+        console.error("Could not review quantity change request:", error);
+        alert(error.message || "Could not review this request. Check Firestore rules and try again.");
+    }
+}
+
 async function clearOrderManagement() {
 
     if (role !== "admin" && role !== "coadmin") {
@@ -2977,6 +3154,7 @@ function renderManagement() {
     let container = document.getElementById("orderList");
     const canEditQuantities = role === "admin" || role === "coadmin";
     const viewLabels = {all:"orders or returns", shop:"shop orders", customer:"customer orders", returns:"returns"};
+    renderQuantityChangeRequestsPanel();
     const savedHorizontalPositions = new Map(
         [...container.querySelectorAll(".table-wrap[data-category-key]")].map(table => [
             table.dataset.categoryKey,
@@ -3108,6 +3286,11 @@ async function setDecision(orderId, productId, status) {
 
     const item = order.items.find(i => i.id === productId);
     if (!item || item.status === "Completed") return;
+    if (status !== "Pending" && quantityChangeRequestFor(orderId, productId)?.status === "Pending") {
+        alert("Review the pending quantity change request before approving or denying this order item.");
+        renderManagement();
+        return;
+    }
 
     const previousStatus = item.status;
     item.status = status;
@@ -3145,6 +3328,11 @@ function updateOrderQuantity(orderId, productId, value) {
     const order = orders.find(o => orderRecordKey(o) === orderId);
     const item = order?.items.find(i => i.id === productId);
     if (!item || item.status === "Completed") return;
+    if (quantityChangeRequestFor(orderId, productId)?.status === "Pending") {
+        alert("Review the pending quantity change request before changing this order quantity.");
+        renderManagement();
+        return;
+    }
 
     const quantity = Number(value);
     if (!Number.isInteger(quantity) || quantity < 1) {
@@ -3685,11 +3873,13 @@ function renderStaffOrderHistory() {
                     ? new Date(order.createdAtValue).toLocaleDateString()
                     : String(order.date || "").split(",")[0],
                 orderId: order.id,
+                orderRecordId: order.recordId || order.docId || order.id,
                 productId: item.id,
                 productName: item.name,
                 category: item.category,
                 qty: item.qty,
                 quantityChanges: Array.isArray(item.quantityChanges) ? item.quantityChanges : [],
+                kind:order.kind || "order",
                 type: order.type,
                 customer: order.customer || "—",
                 status: item.status
@@ -3714,9 +3904,22 @@ function renderStaffOrderHistory() {
             <span>Quantity</span>
             <span>Order Type</span>
             <span>Status</span>
+            <span>Quantity Request</span>
         </div>
 
-        ${rows.map(item => `
+        ${rows.map(item => {
+            const request = quantityChangeRequestFor(item.orderRecordId, item.productId);
+            let requestAction = "—";
+            if (String(item.status || "").toLowerCase() === "pending" && item.kind !== "return") {
+                requestAction = request?.status === "Pending"
+                    ? `<span class="staff-history-status">Waiting for review</span>`
+                    : `<button class="staff-change-request-button" type="button" onclick="requestOrderQuantityChange('${escapeAttr(item.orderRecordId)}','${escapeAttr(item.productId)}',${Number(item.qty)})">Request change</button>${request?.status === "Denied" ? '<div class="small">Previous request denied</div>' : ""}`;
+            } else if (request?.status === "Approved") {
+                requestAction = `<span class="staff-history-status">Change approved</span>`;
+            } else if (request?.status === "Denied") {
+                requestAction = `<span class="staff-history-status">Change denied</span>`;
+            }
+            return `
             <div class="staff-history-row">
                 <span>${escapeHTML(item.date)}</span>
                 <span>${escapeHTML(item.orderId)}</span>
@@ -3726,7 +3929,7 @@ function renderStaffOrderHistory() {
                 <span class="staff-history-changes">
                     ${item.quantityChanges.length
                         ? item.quantityChanges.map(change =>
-                            `${escapeHTML(change.by || "Admin")} changed ${Number(change.from)} to ${Number(change.to)}`
+                            `${escapeHTML(change.by || "Admin")} changed ${Number(change.from)} to ${Number(change.to)}${change.reason ? ` · ${escapeHTML(change.reason)}` : ""}`
                           ).join(" · ")
                         : "—"}
                 </span>
@@ -3737,8 +3940,10 @@ function renderStaffOrderHistory() {
                     ${item.customer !== "—" ? " · " + escapeHTML(item.customer) : ""}
                 </span>
                 <span class="staff-history-status">${escapeHTML(item.status)}</span>
+                <span>${requestAction}</span>
             </div>
-        `).join("")}
+        `;
+        }).join("")}
     `;
 
 }
@@ -4572,6 +4777,105 @@ window.firebaseData = {
     if (isStaffOrder(order)) batch.set(doc(db, "staffOrderHistory", recordId), order);
     await batch.commit();
   },
+  createQuantityChangeRequest: async ({orderRecordId, productId, currentQuantity, requestedQuantity, reason}) => {
+    const user = auth.currentUser;
+    if (!user) throw new Error("Sign in again before requesting a quantity change.");
+    const requestRef = doc(collection(db, "quantityChangeRequests"));
+    const orderRef = doc(db, "orders", orderRecordId);
+    const requestData = {
+      orderRecordId,
+      productId,
+      currentQuantity:Number(currentQuantity),
+      requestedQuantity:Number(requestedQuantity),
+      reason:String(reason || "").trim().slice(0, 250),
+      requestedBy:user.uid,
+      requestedByEmail:user.email || "Staff",
+      createdBy:"STAFF",
+      createdAt:window.formatDateTime12h(new Date()),
+      createdAtValue:Date.now(),
+      status:"Pending"
+    };
+    await runTransaction(db, async transaction => {
+      const orderSnapshot = await transaction.get(orderRef);
+      if (!orderSnapshot.exists()) throw new Error("This order is no longer available.");
+      const orderData = orderSnapshot.data();
+      const item = (orderData.items || []).find(entry => entry.id === productId);
+      if (String(orderData.createdBy || "").toLowerCase() !== "staff" || orderData.kind === "return" || !item || item.status !== "Pending") {
+        throw new Error("A quantity change can only be requested for a pending staff order item.");
+      }
+      if (Number(item.qty) !== Number(currentQuantity)) {
+        throw new Error("The order quantity changed. Refresh the page and submit a new request.");
+      }
+      if (!Number.isSafeInteger(requestData.requestedQuantity) || requestData.requestedQuantity < 1 ||
+          requestData.requestedQuantity === Number(item.qty) || !requestData.reason) {
+        throw new Error("Enter a different whole quantity and a short reason.");
+      }
+      requestData.orderId = orderData.id || orderRecordId;
+      requestData.orderType = orderData.type || "";
+      requestData.productName = item.name || productId;
+      transaction.set(requestRef, requestData);
+    });
+    return {...requestData, id:requestRef.id};
+  },
+  listenQuantityChangeRequests: (callback, onError) => onSnapshot(
+    collection(db, "quantityChangeRequests"),
+    snapshot => callback(snapshot.docs.map(item => ({...item.data(), id:item.id}))),
+    onError
+  ),
+  resolveQuantityChangeRequest: (requestId, decision, reviewerRole) => runTransaction(db, async transaction => {
+    const requestRef = doc(db, "quantityChangeRequests", requestId);
+    const requestSnapshot = await transaction.get(requestRef);
+    if (!requestSnapshot.exists()) throw new Error("This quantity change request no longer exists.");
+    const requestData = requestSnapshot.data();
+    if (requestData.status !== "Pending") throw new Error("This request has already been reviewed.");
+    const reviewedAtValue = Date.now();
+    const reviewedBy = reviewerRole === "coadmin" ? "Co-Admin" : "Admin";
+
+    if (decision === "Denied") {
+      const deniedRequest = {...requestData, status:"Denied", reviewedBy, reviewedAt:window.formatDateTime12h(new Date(reviewedAtValue)), reviewedAtValue};
+      transaction.set(requestRef, deniedRequest);
+      return {request:{...deniedRequest, id:requestId}, order:null};
+    }
+    if (decision !== "Approved") throw new Error("Choose Approve or Deny.");
+
+    const orderRef = doc(db, "orders", requestData.orderRecordId);
+    const productRef = doc(db, "products", requestData.productId);
+    const [orderSnapshot, productSnapshot] = await Promise.all([
+      transaction.get(orderRef),
+      transaction.get(productRef)
+    ]);
+    if (!orderSnapshot.exists() || !productSnapshot.exists()) throw new Error("The order or product no longer exists.");
+
+    const orderData = {...orderSnapshot.data()};
+    const item = (orderData.items || []).find(entry => entry.id === requestData.productId);
+    if (!item || item.status !== "Pending" || Number(item.qty) !== Number(requestData.currentQuantity)) {
+      throw new Error("The order item is no longer pending at the requested starting quantity. Deny this stale request and review the order again.");
+    }
+    const product = productSnapshot.data();
+    if (Number(requestData.requestedQuantity) > Number(product.stock || 0)) {
+      throw new Error(`The new quantity exceeds current stock (${Number(product.stock || 0)}). Deny this request or ask staff for a lower quantity.`);
+    }
+
+    const previousQuantity = Number(item.qty);
+    item.qty = Number(requestData.requestedQuantity);
+    item.quantityChanges = Array.isArray(item.quantityChanges) ? item.quantityChanges : [];
+    item.quantityChanges.push({
+      by:`Staff request approved by ${reviewedBy}`,
+      requestedBy:requestData.requestedByEmail || "Staff",
+      from:previousQuantity,
+      to:item.qty,
+      reason:requestData.reason || "",
+      at:window.formatDateTime12h(new Date(reviewedAtValue)),
+      atValue:reviewedAtValue
+    });
+    const approvedRequest = {...requestData, status:"Approved", reviewedBy, reviewedAt:window.formatDateTime12h(new Date(reviewedAtValue)), reviewedAtValue};
+    transaction.set(orderRef, orderData);
+    if (String(orderData.createdBy || "").toLowerCase() === "staff") {
+      transaction.set(doc(db, "staffOrderHistory", requestData.orderRecordId), orderData, {merge:true});
+    }
+    transaction.set(requestRef, approvedRequest);
+    return {request:{...approvedRequest, id:requestId}, order:{...orderData, docId:requestData.orderRecordId}};
+  }),
   recordOrderDecision: async (order, item, status, decisionAtValue) => {
     const recordId = order.recordId || order.docId || order.id;
     const eventId = `DEC-${recordId}-${item.id}-${decisionAtValue}-${Math.random().toString(36).slice(2, 7)}`;
@@ -4792,6 +5096,9 @@ function clearListeners() {
   unsubscribeData.forEach(stop => stop());
   unsubscribeData = [];
   stopHistoryListeners();
+  stopQuantityChangeRequestListener();
+  quantityChangeRequests = [];
+  quantityChangeRequestBusy.clear();
   if (staffHistoryUnsubscribe) staffHistoryUnsubscribe();
   staffHistoryUnsubscribe = null;
   staffHistoryReady = false;
