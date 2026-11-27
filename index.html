@@ -1127,8 +1127,8 @@ th { background: #f1f5f9; }
 
             <thead>
                 <tr>
-                    <th>Item Name</th>
                     <th>Product Code</th>
+                    <th>Item Name</th>
                     <th>Net Units Out</th>
                 </tr>
             </thead>
@@ -1240,7 +1240,7 @@ th { background: #f1f5f9; }
     </div>
     <div class="table-wrap" style="margin-top:10px">
         <table>
-            <thead><tr><th>Product ID</th><th>Product Name</th><th>Category</th><th>Live Quantity</th></tr></thead>
+            <thead><tr><th>Product ID</th><th>Product Name</th><th>Live Quantity</th><th>Category</th></tr></thead>
             <tbody id="requirementBody"><tr><td colspan="4">No search yet.</td></tr></tbody>
         </table>
     </div>
@@ -1355,9 +1355,7 @@ th { background: #f1f5f9; }
     <div>
         <h2>Order Management</h2>
     </div>
-    <button id="cancelAllManagementButton" class="orange" onclick="cancelAllManagementItems()" style="display:none">Cancel All</button>
     <button id="clearManagementButton" class="red" onclick="clearOrderManagement()">Clear Orders &amp; Returns</button>
-    <button id="resetTestDataButton" class="red" onclick="resetAllTestData()" style="display:none">Reset All Test Data</button>
 </div>
 
 <div class="management-view-switch" role="group" aria-label="Order management views">
@@ -1593,12 +1591,6 @@ function changeRole(assignedRole) {
     if (clearManagementButton) {
         clearManagementButton.style.display = role === "admin" || role === "coadmin" ? "" : "none";
     }
-    const cancelAllManagementButton = document.getElementById("cancelAllManagementButton");
-    if (cancelAllManagementButton) {
-        cancelAllManagementButton.style.display = role === "admin" || role === "coadmin" ? "" : "none";
-    }
-    const resetTestDataButton = document.getElementById("resetTestDataButton");
-    if (resetTestDataButton) resetTestDataButton.style.display = role === "admin" ? "" : "none";
     ["downloadOrderHistoryButton", "clearOrderHistoryButton"].forEach(id => {
         const button = document.getElementById(id);
         if (button) button.style.display = role === "admin" ? "" : "none";
@@ -1758,8 +1750,8 @@ async function renderInventory(forceStockRefresh = false) {
     let header = `
         <th>Product ID</th>
         <th>Product Name</th>
-        <th>Category</th>
         <th>Current Stock</th>
+        <th>Category</th>
     `;
 
     if (role === "admin") {
@@ -1779,8 +1771,8 @@ async function renderInventory(forceStockRefresh = false) {
         <tr>
             <td>${escapeHTML(p.id)}</td>
             <td class="important-product-name">${escapeHTML(p.name)}</td>
-            <td>${escapeHTML(p.category)}</td>
             <td class="important-stock-value">${p.stockReady ? p.stock : "Loading…"}</td>
+            <td>${escapeHTML(p.category)}</td>
 
             ${role === "admin" ? `
 
@@ -1888,8 +1880,8 @@ function renderRequirementPage(pageIndex) {
         <tr>
             <td>${escapeHTML(product.id)}</td>
             <td class="important-product-name">${escapeHTML(product.name)}</td>
-            <td>${escapeHTML(product.category)}</td>
             <td class="important-stock-value">${Number(product.stock) || 0}</td>
+            <td>${escapeHTML(product.category)}</td>
         </tr>
     `).join("") || '<tr><td colspan="4">No matching products found.</td></tr>';
     document.getElementById("requirementStatus").textContent = page.rows.length
@@ -1991,8 +1983,8 @@ function downloadRequirementPage() {
     if (!page?.rows.length) return;
     if (!window.XLSX) return alert("Excel download is not ready. Check your connection and try again.");
     const rows = [
-        ["Product ID", "Product Name", "Category", "Live Quantity"],
-        ...page.rows.map(product => [product.id, product.name, product.category, Number(product.stock) || 0])
+        ["Product ID", "Product Name", "Live Quantity", "Category"],
+        ...page.rows.map(product => [product.id, product.name, Number(product.stock) || 0, product.category])
     ];
     const workbook = window.XLSX.utils.book_new();
     const worksheet = window.XLSX.utils.aoa_to_sheet(rows);
@@ -2204,10 +2196,10 @@ async function downloadCurrentStock() {
         const stockRows = await window.firebaseData.getAllProductStocks();
         const stockById = new Map(stockRows.map(product => [String(product.id), Number(product.stock) || 0]));
         const rows = [
-            ["Product ID", "Product Name", "Category", "Current Stock"],
+            ["Product ID", "Product Name", "Current Stock", "Category"],
             ...[...catalogProducts]
                 .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, {numeric:true}))
-                .map(product => [String(product.id), product.name, product.category, stockById.get(String(product.id)) ?? 0])
+                .map(product => [String(product.id), product.name, stockById.get(String(product.id)) ?? 0, product.category])
         ];
         const sheet = window.XLSX.utils.aoa_to_sheet(rows);
         const workbook = window.XLSX.utils.book_new();
@@ -2911,110 +2903,6 @@ function upsertOrder(records, order) {
     return dedupeOrders([...records.filter(item => String(orderRecordKey(item) || "") !== key), order]);
 }
 
-async function resetAllTestData() {
-    if (role !== "admin") return alert("Only Admin can reset test data.");
-    const confirmed = confirm(
-        "Permanently delete ALL Firebase test data: current orders, returns, admin/co-admin history, staff history, stock movement history, and all Firebase stock records? Product names and categories from the GitHub catalogue will remain. Reupload your stock workbook after the reset. This cannot be undone."
-    );
-    if (!confirmed) return;
-    const button = document.getElementById("resetTestDataButton");
-    if (button) button.disabled = true;
-    try {
-        const result = await window.firebaseData.resetAllTestData();
-        orders = [];
-        orderHistory = [];
-        archivedOrders = [];
-        stockMovementHistory = [];
-        staffOrderHistory = [];
-        activeOrderSequence = 1;
-        popularityTotals = {};
-        popularityTotalsReady = true;
-        historyPage = 1;
-        products.forEach(product => { product.stock = 0; product.stockReady = true; });
-        stockCacheTimes.clear();
-        renderManagement();
-        renderOrderHistory();
-        renderStaffOrderHistory();
-        renderInventory();
-        updateDashboard();
-        alert(`Reset complete. Deleted ${result.deleted} records. New IDs will start at SHOP-0001, CUST-0001, and RET-0001. Upload the stock workbook to restore current quantities.`);
-    } catch (error) {
-        console.error("Could not reset test data:", error);
-        alert("Could not reset all test data. Check Firebase rules/connection. Some collections may already have been cleared; run Reset All Test Data again to finish.");
-    } finally {
-        if (button) button.disabled = false;
-    }
-}
-
-async function cancelAllManagementItems() {
-
-    if (role !== "admin" && role !== "coadmin") {
-        alert("Only Admin and Co-Admin can cancel all orders and returns.");
-        return;
-    }
-
-    const pendingByOrder = orders.map(order => ({
-        order,
-        items: (order.items || []).filter(item =>
-            ["pending", "approved"].includes(String(item.status || "").toLowerCase())
-        )
-    })).filter(entry => entry.items.length);
-    const itemCount = pendingByOrder.reduce((sum, entry) => sum + entry.items.length, 0);
-    if (!itemCount) {
-        alert("There are no pending or approved items to cancel.");
-        return;
-    }
-
-    if (!confirm(`Cancel all ${itemCount} pending or approved order/return item(s)? They will be marked Denied, kept in the existing records, and no stock will move.`)) return;
-    if (!window.firebaseData?.setOrder || !window.firebaseData?.recordOrderDecision) {
-        alert("Could not cancel orders because Firebase is not ready.");
-        return;
-    }
-
-    const button = document.getElementById("cancelAllManagementButton");
-    if (button) button.disabled = true;
-    let cancelled = 0;
-    try {
-        for (const entry of pendingByOrder) {
-            const cancelledItemIds = new Set(entry.items.map(item => String(item.id)));
-            const updatedOrder = {
-                ...entry.order,
-                items: (entry.order.items || []).map(item => cancelledItemIds.has(String(item.id))
-                    ? {...item, status:"Denied"}
-                    : item)
-            };
-            await window.firebaseData.setOrder(updatedOrder);
-            orders = upsertOrder(orders, updatedOrder);
-
-            for (const item of updatedOrder.items) {
-                if (!cancelledItemIds.has(String(item.id))) continue;
-                const decisionEvent = await window.firebaseData.recordOrderDecision(
-                    updatedOrder,
-                    item,
-                    "Denied",
-                    Date.now()
-                );
-                orderHistory = [decisionEvent, ...orderHistory.filter(event => event.id !== decisionEvent.id)];
-                cancelled++;
-            }
-        }
-        renderManagement();
-        searchProducts();
-        searchReturnProducts();
-        updateDashboard();
-        renderOrderHistory();
-        renderStaffOrderHistory();
-        alert(`Cancelled ${cancelled} item(s). They are marked Denied; no stock was changed.`);
-    } catch (error) {
-        console.error("Could not cancel all active order items:", error);
-        renderManagement();
-        updateDashboard();
-        alert(`Cancellation stopped after ${cancelled} item(s). Refresh the page to load the latest order status, then retry if needed.`);
-    } finally {
-        if (button) button.disabled = false;
-    }
-}
-
 async function clearOrderManagement() {
 
     if (role !== "admin" && role !== "coadmin") {
@@ -3584,9 +3472,9 @@ function renderPopularItems(resetPage = false) {
 
             <tr>
 
-                <td>${escapeHTML(p.name)}</td>
-
                 <td>${escapeHTML(p.id)}</td>
+
+                <td>${escapeHTML(p.name)}</td>
 
                 <td>${p.count}</td>
 
@@ -3637,8 +3525,8 @@ function downloadPopularItems() {
     const category = document.getElementById("dashboardCategory").value;
     const results = getPopularItemResults(category);
     const rows = [
-        ["Item Name", "Product Code", "Net Units Out"],
-        ...results.map(item => [item.name, item.id, item.count])
+        ["Product Code", "Item Name", "Net Units Out"],
+        ...results.map(item => [item.id, item.name, item.count])
     ];
     const worksheet = window.XLSX.utils.aoa_to_sheet(rows);
     const workbook = window.XLSX.utils.book_new();
@@ -4706,26 +4594,6 @@ window.firebaseData = {
     };
     await setDoc(doc(db, "orderHistory", eventId), event);
     return event;
-  },
-  resetAllTestData: async () => {
-    let deleted = 0;
-    for (const name of ["orders", "orderHistory", "archivedOrders", "stockMovementHistory", "staffOrderHistory", "products"]) {
-      const snapshot = await getDocs(collection(db, name));
-      for (let offset = 0; offset < snapshot.docs.length; offset += 400) {
-        const batch = writeBatch(db);
-        const chunk = snapshot.docs.slice(offset, offset + 400);
-        chunk.forEach(item => batch.delete(item.ref));
-        await batch.commit();
-        deleted += chunk.length;
-      }
-    }
-    await setDoc(doc(db, "appSettings", "history"), {
-      activeOrderSequence:1,
-      adminHistoryClearedAt:Date.now(),
-      staffHistoryClearedAt:Date.now(),
-      netPopularity:{}
-    }, {merge:true});
-    return {deleted};
   },
   getSettings: async () => {
     const snapshot = await getDoc(doc(db, "appSettings", "history"));
