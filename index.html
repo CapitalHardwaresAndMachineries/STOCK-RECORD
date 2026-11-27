@@ -2985,14 +2985,14 @@ function renderQuantityChangeRequestsPanel() {
     panel.innerHTML = `<h3>Quantity Change Requests</h3>${pendingRequests.map(request => {
         const order = orders.find(candidate => orderRecordKey(candidate) === request.orderRecordId);
         const item = order?.items?.find(candidate => candidate.id === request.productId);
-        const canApprove = Boolean(item && item.status === "Pending" && Number(item.qty) === Number(request.currentQuantity));
+        const canApprove = Boolean(item && ["Pending", "Approved"].includes(item.status) && !item.historyEventId && Number(item.qty) === Number(request.currentQuantity));
         const orderLabel = order?.id || request.orderId || request.orderRecordId;
         const reviewerMessage = canApprove
             ? ""
-            : `<div class="small">This order item has changed since the request. Deny this request before taking another action.</div>`;
+            : `<div class="small">This item may have been processed or changed. Deny this request if it is no longer valid.</div>`;
         return `<div class="quantity-change-request">
             <div class="quantity-change-request-details">
-                <strong>${escapeHTML(orderLabel)} · ${escapeHTML(request.productName || request.productId)}</strong>
+                <strong>${escapeHTML(orderLabel)} · ${escapeHTML(request.orderType || "Order")} · ${escapeHTML(request.productName || request.productId)}</strong>
                 <div>Quantity: ${Number(request.currentQuantity)} → <strong>${Number(request.requestedQuantity)}</strong></div>
                 <div class="small">Requested by ${escapeHTML(request.requestedByEmail || "Staff")} · ${escapeHTML(request.createdAt || "")}</div>
                 <div class="small">Reason: ${escapeHTML(request.reason || "—")}</div>
@@ -3010,8 +3010,8 @@ async function requestOrderQuantityChange(orderRecordId, productId, currentQuant
     if (role !== "staff") return alert("Only Staff can request a quantity change.");
     const order = orders.find(candidate => orderRecordKey(candidate) === orderRecordId);
     const item = order?.items?.find(candidate => candidate.id === productId);
-    if (!order || !item || item.status !== "Pending") {
-        return alert("Quantity changes can only be requested for pending order items.");
+    if (!order || !item || !["Pending", "Approved"].includes(item.status) || item.historyEventId) {
+        return alert("Quantity changes can only be requested before Stock OUT or Stock IN is completed.");
     }
     const currentRequest = quantityChangeRequestFor(orderRecordId, productId);
     if (currentRequest?.status === "Pending") {
@@ -3045,7 +3045,7 @@ async function requestOrderQuantityChange(orderRecordId, productId, currentQuant
         });
         quantityChangeRequests = [request, ...quantityChangeRequests.filter(existing => existing.id !== request.id)];
         renderStaffOrderHistory();
-        alert("Quantity change request sent to Admin and Co-Admin. The order quantity remains unchanged until approved.");
+        alert("Quantity change request sent to Admin and Co-Admin. The item quantity and stock stay unchanged until the request is approved.");
     } catch (error) {
         console.error("Could not submit quantity change request:", error);
         alert(error.message || "Could not send the quantity change request. Check the connection and updated Firestore rules.");
@@ -3072,8 +3072,8 @@ async function resolveQuantityChangeRequest(requestId, decision) {
         renderStaffOrderHistory();
         updateDashboard();
         alert(decision === "Approved"
-            ? `Approved. The pending order quantity is now ${request.requestedQuantity}.`
-            : "Quantity change request denied. The original order quantity is unchanged.");
+            ? `Quantity change approved. The item will use quantity ${request.requestedQuantity} when it is stocked out or stocked in. Stock has not moved yet.`
+            : "Quantity change request denied. The original quantity and stock are unchanged.");
     } catch (error) {
         console.error("Could not review quantity change request:", error);
         alert(error.message || "Could not review this request. Check Firestore rules and try again.");
@@ -3225,6 +3225,7 @@ function renderManagement() {
             const available = product ? product.stock : 0;
             const statusClass = String(item.status || "Pending").toLowerCase();
             const completed = item.status === "Completed";
+            const hasOpenQuantityChange = quantityChangeRequestFor(orderRecordKey(order), item.id)?.status === "Pending";
             return `
                 <tr>
                     <td>${escapeHTML(order.id)}</td>
@@ -3241,7 +3242,7 @@ function renderManagement() {
                         <option value="Denied" ${item.status === "Denied" ? "selected" : ""}>Denied</option>
                         ${completed ? '<option value="Completed" selected>Completed</option>' : ""}
                     </select></td>
-                    ${role === "admin" ? `<td><button class="admin-approve ${completed ? "is-approved" : ""}" onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}')" ${item.status !== "Approved" || completed ? "disabled" : ""}>${completed ? "Completed" : isReturn ? "Stock IN" : "Stock OUT"}</button></td>` : ""}
+                    ${role === "admin" ? `<td><button class="admin-approve ${completed ? "is-approved" : ""}" onclick="${isReturn ? "stockInReturn" : "stockOutItem"}('${escapeAttr(orderRecordKey(order))}','${escapeAttr(item.id)}')" ${item.status !== "Approved" || completed || hasOpenQuantityChange ? "disabled" : ""}>${completed ? "Completed" : isReturn ? "Stock IN" : "Stock OUT"}</button></td>` : ""}
                 </tr>
             `;
         }).join("");
@@ -3286,8 +3287,8 @@ async function setDecision(orderId, productId, status) {
 
     const item = order.items.find(i => i.id === productId);
     if (!item || item.status === "Completed") return;
-    if (status !== "Pending" && quantityChangeRequestFor(orderId, productId)?.status === "Pending") {
-        alert("Review the pending quantity change request before approving or denying this order item.");
+    if (status !== item.status && quantityChangeRequestFor(orderId, productId)?.status === "Pending") {
+        alert("Review the pending quantity change request before changing this order item's decision.");
         renderManagement();
         return;
     }
@@ -3376,6 +3377,10 @@ async function stockOutItem(orderId, productId) {
 
     const order = orders.find(o => orderRecordKey(o) === orderId);
     if (!order || order.kind === "return") return;
+    if (quantityChangeRequestFor(orderId, productId)?.status === "Pending") {
+        alert("Review the pending quantity change request before Stock OUT.");
+        return;
+    }
 
     const item = order.items.find(i => i.id === productId);
     if (!item || item.status !== "Approved") {
@@ -3425,6 +3430,10 @@ async function stockInReturn(orderId, productId) {
     }
     const order = orders.find(current => orderRecordKey(current) === orderId);
     if (!order || order.kind !== "return") return;
+    if (quantityChangeRequestFor(orderId, productId)?.status === "Pending") {
+        alert("Review the pending quantity change request before Stock IN.");
+        return;
+    }
 
     const item = order.items.find(current => current.id === productId);
     if (!item || item.status !== "Approved") {
@@ -3879,6 +3888,7 @@ function renderStaffOrderHistory() {
                 category: item.category,
                 qty: item.qty,
                 quantityChanges: Array.isArray(item.quantityChanges) ? item.quantityChanges : [],
+                historyEventId:item.historyEventId || "",
                 kind:order.kind || "order",
                 type: order.type,
                 customer: order.customer || "—",
@@ -3910,7 +3920,7 @@ function renderStaffOrderHistory() {
         ${rows.map(item => {
             const request = quantityChangeRequestFor(item.orderRecordId, item.productId);
             let requestAction = "—";
-            if (String(item.status || "").toLowerCase() === "pending" && item.kind !== "return") {
+            if (["pending", "approved"].includes(String(item.status || "").toLowerCase()) && !item.historyEventId) {
                 requestAction = request?.status === "Pending"
                     ? `<span class="staff-history-status">Waiting for review</span>`
                     : `<button class="staff-change-request-button" type="button" onclick="requestOrderQuantityChange('${escapeAttr(item.orderRecordId)}','${escapeAttr(item.productId)}',${Number(item.qty)})">Request change</button>${request?.status === "Denied" ? '<div class="small">Previous request denied</div>' : ""}`;
@@ -4800,8 +4810,9 @@ window.firebaseData = {
       if (!orderSnapshot.exists()) throw new Error("This order is no longer available.");
       const orderData = orderSnapshot.data();
       const item = (orderData.items || []).find(entry => entry.id === productId);
-      if (String(orderData.createdBy || "").toLowerCase() !== "staff" || orderData.kind === "return" || !item || item.status !== "Pending") {
-        throw new Error("A quantity change can only be requested for a pending staff order item.");
+      if (String(orderData.createdBy || "").toLowerCase() !== "staff" || !item ||
+          !["Pending", "Approved"].includes(item.status) || item.historyEventId) {
+        throw new Error("A quantity change can only be requested before Stock OUT or Stock IN is completed.");
       }
       if (Number(item.qty) !== Number(currentQuantity)) {
         throw new Error("The order quantity changed. Refresh the page and submit a new request.");
@@ -4848,11 +4859,11 @@ window.firebaseData = {
 
     const orderData = {...orderSnapshot.data()};
     const item = (orderData.items || []).find(entry => entry.id === requestData.productId);
-    if (!item || item.status !== "Pending" || Number(item.qty) !== Number(requestData.currentQuantity)) {
-      throw new Error("The order item is no longer pending at the requested starting quantity. Deny this stale request and review the order again.");
+    if (!item || !["Pending", "Approved"].includes(item.status) || item.historyEventId || Number(item.qty) !== Number(requestData.currentQuantity)) {
+      throw new Error("The item has already been processed or changed since the request. Deny this stale request.");
     }
     const product = productSnapshot.data();
-    if (Number(requestData.requestedQuantity) > Number(product.stock || 0)) {
+    if (orderData.kind !== "return" && Number(requestData.requestedQuantity) > Number(product.stock || 0)) {
       throw new Error(`The new quantity exceeds current stock (${Number(product.stock || 0)}). Deny this request or ask staff for a lower quantity.`);
     }
 
