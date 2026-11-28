@@ -171,6 +171,19 @@ button:disabled {
     display: none;
 }
 
+.inventory-search-controls {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(170px, 240px);
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+@media(max-width: 600px) {
+    .inventory-search-controls {
+        grid-template-columns: 1fr;
+    }
+}
+
 .dashboard-card-heading {
     display: flex;
     align-items: center;
@@ -1168,6 +1181,7 @@ th { background: #f1f5f9; }
                     <th>Product Code</th>
                     <th>Item Name</th>
                     <th>Net Units Out</th>
+                    <th>Category</th>
                 </tr>
             </thead>
 
@@ -1206,13 +1220,19 @@ th { background: #f1f5f9; }
 
 <h2>Inventory</h2>
 
-<div class="search-field">
-    <input class="search"
-           id="inventorySearch"
-           placeholder="Search Product ID, Name or Category..."
-           oninput="inventoryPage=1;renderInventory();updateSearchClearButton('inventorySearch')">
-    <button class="search-clear-button" type="button" hidden
-            aria-label="Clear inventory search" onclick="clearSearchInput('inventorySearch')">×</button>
+<div class="inventory-search-controls">
+    <div class="search-field">
+        <input class="search"
+               id="inventorySearch"
+               placeholder="Search Product ID, Name or Category..."
+               oninput="inventoryPage=1;renderInventory();updateSearchClearButton('inventorySearch')">
+        <button class="search-clear-button" type="button" hidden
+                aria-label="Clear inventory search" onclick="clearSearchInput('inventorySearch')">×</button>
+    </div>
+    <select id="inventoryCategoryFilter" aria-label="Filter inventory by category"
+            onchange="inventoryPage=1;renderInventory()">
+        <option value="All Categories">All Categories</option>
+    </select>
 </div>
 
 <div id="adminInventoryTools"
@@ -1826,8 +1846,10 @@ async function renderInventory(forceStockRefresh = false) {
 
     let query = document.getElementById("inventorySearch")
         .value.toLowerCase().trim();
+    const category = document.getElementById("inventoryCategoryFilter")?.value || "All Categories";
 
     let filtered = catalogProducts.filter(p =>
+        (category === "All Categories" || p.category === category) &&
         [p.id,p.name,p.category].some(value =>
             String(value || "").toLowerCase().includes(query)
         )
@@ -1938,6 +1960,18 @@ function initializeRequirementCategories() {
         categories.map(category => `<option value="${escapeAttr(category)}">${escapeHTML(category)}</option>`).join("");
 }
 window.stockAppInitializeRequirementCategories = initializeRequirementCategories;
+
+function initializeInventoryCategories() {
+    const select = document.getElementById("inventoryCategoryFilter");
+    if (!select) return;
+    const previous = select.value || "All Categories";
+    const categories = [...new Set(catalogProducts.map(product => String(product.category || "").trim()).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b));
+    select.innerHTML = '<option value="All Categories">All Categories</option>' +
+        categories.map(category => `<option value="${escapeAttr(category)}">${escapeHTML(category)}</option>`).join("");
+    select.value = categories.includes(previous) ? previous : "All Categories";
+}
+window.stockAppInitializeInventoryCategories = initializeInventoryCategories;
 
 function updateRequirementClearButton() {
     const button = document.getElementById("requirementClearButton");
@@ -3627,6 +3661,7 @@ function getPopularItemResults(category = "All Categories") {
             return {
                 name:p.name,
                 id:p.id,
+                category:p.category || "",
                 count:Math.max(0, netUnitsByProduct.get(p.id) || 0)
             };
 
@@ -3707,13 +3742,15 @@ function renderPopularItems(resetPage = false) {
 
                 <td>${p.count}</td>
 
+                <td>${escapeHTML(p.category)}</td>
+
             </tr>
 
         `).join("")
 
         : `
             <tr>
-                <td colspan="3">No products found.</td>
+                <td colspan="4">No products found.</td>
             </tr>
         `;
 
@@ -3754,8 +3791,8 @@ function downloadPopularItems() {
     const category = document.getElementById("dashboardCategory").value;
     const results = getPopularItemResults(category);
     const rows = [
-        ["Product Code", "Item Name", "Net Units Out"],
-        ...results.map(item => [item.id, item.name, item.count])
+        ["Product Code", "Item Name", "Net Units Out", "Category"],
+        ...results.map(item => [item.id, item.name, item.count, item.category])
     ];
     const worksheet = window.XLSX.utils.aoa_to_sheet(rows);
     const workbook = window.XLSX.utils.book_new();
@@ -4514,7 +4551,7 @@ const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 let unsubscribeData = [];
 let signOutMessage = "";
-const IDLE_LOGOUT_MS = 24 * 60 * 60 * 1000;
+const IDLE_LOGOUT_MS = 60 * 60 * 1000;
 let idleLogoutTimer = null;
 let idleTrackedUid = "";
 let lastUserActivityAt = Date.now();
@@ -5291,6 +5328,7 @@ async function startWorkspace(user, role, profileData = {}) {
     return {id,name,category};
   });
   window.stockAppInitializeRequirementCategories();
+  window.stockAppInitializeInventoryCategories();
   products = catalogProducts.map(item => ({...item,stock:0,stockReady:false}));
   stockCacheTimes.clear();
   window.productDataReady = true;
